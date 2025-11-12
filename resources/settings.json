@@ -1,0 +1,10 @@
+{
+  "mod_paths": {
+    "gi": "D:/#1XXMI-GIMI/t/GIMI/Mods",
+    "hsr": "D:/#1XXMI-GIMI/t/SRMI/mods",
+    "wuwa": "D:/#1XXMI-GIMI/t/SRMI/mods",
+    "zzz": "D:/#1XXMI-GIMI/t/ZZMI/Mods"
+  },
+  "theme": "dark",
+  "version": "1.0.0"
+}
