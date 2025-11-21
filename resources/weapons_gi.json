@@ -161,5 +161,6 @@
   {"id": "wine_and_song", "name": "Wine and Song"},
   {"id": "xiphos_moonlight", "name": "Xiphos' Moonlight"},
   {"id": "yakshas_claw", "name": "Yaksha's Claw"},
-  {"id": "yearning_shadow", "name": "Yearning Shadow"}
+  {"id": "yearning_shadow", "name": "Yearning Shadow"},
+  {"id": "other", "name": "other"}
 ]

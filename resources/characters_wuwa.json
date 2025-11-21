@@ -38,5 +38,10 @@
   {"id": "yuanwu", "name": "Yuanwu"},
   {"id": "yinlin", "name": "Yinlin"},
   {"id": "zani", "name": "Zani"},
-  {"id": "zhezhi", "name": "Zhezhi"}
+  {"id": "zhezhi", "name": "Zhezhi"},
+
+  {"id": "exorcistic_adjuration", "name": "Exorcistic_Adjuration"},
+  {"id": "laurel_nymph", "name": "Laurel_Nymph"},
+  {"id": "peach_blossom", "name": "Peach_Blossom"},
+  {"id": "splashing_summer", "name": "Splashing_Summer"}
 ]

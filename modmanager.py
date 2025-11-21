@@ -1,4 +1,4 @@
-# Version 1.0.9
+# Version 1.1.0
 # modmanager.py - Mod Manager GUI with update checks and settings
 # NOTE: Designed to be run with Python 3.10+ and PyQt6 installed.
 # Uses only stdlib network (urllib) to avoid extra pip deps for update check.
@@ -25,7 +25,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.0.9"  # keep in sync with settings default "version"
+SCRIPT_VERSION = "1.1.0"  # keep in sync with settings default "version"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
