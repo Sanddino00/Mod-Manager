@@ -25,7 +25,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.1.0"  # keep in sync with settings default "version"
+SCRIPT_VERSION = "1.1.1"  # keep in sync with settings default "version"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -46,6 +46,12 @@ EXPECTED_UPDATE_EXE_NAME = "update.exe"      # name of the installer/updater exe
 EXPECTED_RESOURCES_ZIP_NAME = "resources.zip"  # name of resources zip in releases
 EXPECTED_MODMANAGER_EXE_NAME = "modmanager.exe"
 
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        print("Failed to save settings:", e)
 # -------------------- SETTINGS --------------------
 default_mod_paths = {
     "gi": os.path.join(BASE_DIR, "gimi", "mods"),
@@ -80,6 +86,10 @@ else:
                 "last_release_tag": None,
                 "install_path_info": None
             }
+# After loading settings (both new and existing)
+if settings.get("version") != SCRIPT_VERSION:
+    settings["version"] = SCRIPT_VERSION
+    save_settings()
 
 # -------------------- WATCHDOG --------------------
 class ModFolderHandler(FileSystemEventHandler):
@@ -90,12 +100,7 @@ class ModFolderHandler(FileSystemEventHandler):
         self.callback()
 
 # -------------------- UTILITIES --------------------
-def save_settings():
-    try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2)
-    except Exception as e:
-        print("Failed to save settings:", e)
+
 
 def semver_normalize(tag):
     """Strip leading 'v' and return normalized semver string."""
@@ -216,8 +221,8 @@ class ModManager(QWidget):
         self.update_label = QLabel("Update available")
         self.update_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         # start hidden until check runs
-        self.update_dot.setVisible(True)
-        self.update_label.setVisible(True)
+        self.update_dot.setVisible(False)
+        self.update_label.setVisible(False)
 
         top_layout.addWidget(self.update_dot)
         top_layout.addWidget(self.update_label)
@@ -624,7 +629,8 @@ class ModManager(QWidget):
             return
         tag = latest.get("tag_name") or latest.get("name")
         tag_norm = semver_normalize(tag)
-        installed = semver_normalize(settings.get("version", SCRIPT_VERSION))
+        installed = semver_normalize(SCRIPT_VERSION)
+
         if tag_norm and installed and is_version_newer(installed, tag_norm):
             settings["last_release_tag"] = tag
             save_settings()
@@ -638,10 +644,12 @@ class ModManager(QWidget):
     def set_update_status(self, available: bool, label_text: str):
         # must call from main thread — use QTimer.singleShot to schedule
         def _apply():
+            self.update_dot.setVisible(True)
+            self.update_label.setVisible(True)
             if available:
-                self.update_dot.setStyleSheet("color: green; font-weight: bold;")
-            else:
                 self.update_dot.setStyleSheet("color: red; font-weight: bold;")
+            else:
+                self.update_dot.setStyleSheet("color: green; font-weight: bold;")
             self.update_label.setText(label_text)
         QTimer.singleShot(0, _apply)
 
