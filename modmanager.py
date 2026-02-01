@@ -1,4 +1,4 @@
-# Version 1.2.0
+# Version 1.2.1
 # modmanager.py - Mod Manager GUI with update checks and settings
 # NOTE: Designed to be run with Python 3.10+ and PyQt6 installed.
 # Uses only stdlib network (urllib) to avoid extra pip deps for update check.
@@ -18,7 +18,8 @@ from packaging import version as pkg_version  # packaging is often available; fa
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QComboBox, QTabWidget, QGridLayout, QScrollArea, QFrame, QFileDialog,
-    QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit, QTextEdit
+    QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit, QTextEdit,
+    QInputDialog, QSizePolicy
 )
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtCore import Qt, QTimer
@@ -26,7 +27,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.2.0"  # keep in sync with settings default "version"
+SCRIPT_VERSION = "1.2.1"  # keep in sync with settings default "version"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -569,57 +570,76 @@ class ModManager(QWidget):
         # target label
         tgt = settings.get("script_targets", {}).get(self.selected_game,
                                                       settings.get("mod_paths", {}).get(self.selected_game, "No target selected"))
+        # Compact target row with buttons to save vertical space
         self.fixes_target_label = QLabel(tgt)
-        self.fixes_layout.addWidget(QLabel("Target Folder:"))
-        self.fixes_layout.addWidget(self.fixes_target_label)
+        target_row = QHBoxLayout()
+        lbl = QLabel("Target Folder:")
+        lbl.setMaximumWidth(110)
+        target_row.addWidget(lbl)
+        self.fixes_target_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.fixes_target_label.setMaximumHeight(24)
+        # Slightly dim the path color for readability
+        self.fixes_target_label.setStyleSheet("color: #bdbdbd;")
+        target_row.addWidget(self.fixes_target_label, 1)
 
-        row = QHBoxLayout()
         btn_sel = QPushButton("Select Target Folder")
         btn_sel.clicked.connect(self.select_fixes_target_folder)
-        row.addWidget(btn_sel)
+        target_row.addWidget(btn_sel)
         btn_refresh = QPushButton("Refresh Scripts")
         btn_refresh.clicked.connect(self.populate_fixes_scripts)
-        row.addWidget(btn_refresh)
+        target_row.addWidget(btn_refresh)
         # Download RabbitFX button (per-game links)
         btn_rabbit = QPushButton("Download RabbitFX")
         btn_rabbit.clicked.connect(self.open_rabbitfx)
-        row.addWidget(btn_rabbit)
-        self.fixes_layout.addLayout(row)
+        target_row.addWidget(btn_rabbit)
 
+        self.fixes_layout.addLayout(target_row)
+
+        # Create list and info side-by-side to use space efficiently
         self.fixes_list = QListWidget()
-        self.fixes_list.setMaximumHeight(200)
         self.fixes_list.itemSelectionChanged.connect(self.on_fixes_selection_changed)
-        self.fixes_layout.addWidget(self.fixes_list)
 
         self.fixes_run_btn = QPushButton("Run Selected Fix")
         self.fixes_run_btn.setEnabled(False)
         self.fixes_run_btn.clicked.connect(self.run_selected_fix)
-        self.fixes_layout.addWidget(self.fixes_run_btn)
 
-        # Terminal output display
-        self.fixes_output = QTextEdit()
-        self.fixes_output.setReadOnly(True)
-        self.fixes_output.setStyleSheet("background-color: #111; color: #0f0; font-family: Courier;")
-        self.fixes_layout.addWidget(QLabel("Output:"))
-        self.fixes_layout.addWidget(self.fixes_output, 1)  # stretch to fill remaining space
+        # Info display (shared across all games) - loads resources/info.json
+        self.fixes_info = QTextEdit()
+        self.fixes_info.setReadOnly(True)
+        self.fixes_info.setPlaceholderText("No info available.")
+        # Theme-aware styling to ensure readable text on dark/light themes
+        if settings.get("theme", "dark") == "dark":
+            info_style = "background-color: #0f0f0f; color: #e0e0e0; border: 1px solid rgba(255,255,255,0.06); padding:6px; border-radius:6px;"
+        else:
+            info_style = "background-color: #ffffff; color: #111; border: 1px solid rgba(0,0,0,0.08); padding:6px; border-radius:6px;"
+        self.fixes_info.setStyleSheet(info_style)
 
-        # Input field for interactive prompts
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(QLabel("Input:"))
-        self.fixes_input = QLineEdit()
-        self.fixes_input.setPlaceholderText("Enter input for prompts (e.g., yes/no) and press Enter")
-        self.fixes_input.returnPressed.connect(self.send_fixes_input)
-        input_layout.addWidget(self.fixes_input)
-        self.fixes_layout.addLayout(input_layout)
+        # Layout: left column (list + run button), right column (Info label + box)
+        fixes_main = QHBoxLayout()
 
-        # Clear output button
-        btn_clear = QPushButton("Clear Output")
-        btn_clear.clicked.connect(self.clear_fixes_output)
-        self.fixes_layout.addWidget(btn_clear)
+        left_col = QVBoxLayout()
+        self.fixes_list.setMaximumHeight(420)
+        left_col.addWidget(self.fixes_list)
+        left_col.addWidget(self.fixes_run_btn)
 
-        self.fixes_process = None  # Will hold subprocess.Popen instance
-        self.fixes_thread = None  # Will hold reader thread
+        right_col = QVBoxLayout()
+        info_lbl = QLabel("Info:")
+        info_lbl.setMaximumHeight(20)
+        right_col.addWidget(info_lbl)
+        self.fixes_info.setMaximumHeight(420)
+        right_col.addWidget(self.fixes_info)
+
+        fixes_main.addLayout(left_col, 3)
+        fixes_main.addLayout(right_col, 2)
+
+        self.fixes_layout.addLayout(fixes_main)
+
+        # Terminal/process bookkeeping (scripts run in native consoles)
+        self.fixes_process = None
+        self.fixes_thread = None
+
         QTimer.singleShot(100, self.populate_fixes_scripts)
+        QTimer.singleShot(200, self.load_fixes_info)
 
     def select_fixes_target_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Target Folder")
@@ -635,6 +655,11 @@ class ModManager(QWidget):
                                                       settings.get("mod_paths", {}).get(self.selected_game, "No target selected"))
         self.fixes_target_label.setText(tgt)
         self.populate_fixes_scripts()
+        # Reload shared info text for fixes area
+        try:
+            self.load_fixes_info()
+        except Exception:
+            pass
 
     def populate_fixes_scripts(self):
         self.fixes_list.clear()
@@ -659,6 +684,29 @@ class ModManager(QWidget):
         target = settings.get("script_targets", {}).get(self.selected_game) or settings.get("mod_paths", {}).get(self.selected_game)
         self.fixes_run_btn.setEnabled(bool(sel and target))
 
+    def load_fixes_info(self):
+        """Load shared info text from resources/info.json and display in the fixes info widget."""
+        info_file = os.path.join(RESOURCES, "info.json")
+        text = ""
+        if os.path.exists(info_file):
+            try:
+                with open(info_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict) and "info" in data:
+                        text = str(data.get("info") or "")
+                    else:
+                        # If it's not a dict with 'info', pretty-print the JSON
+                        text = json.dumps(data, indent=2, ensure_ascii=False)
+            except Exception:
+                text = "(Failed to load info.json)"
+        else:
+            text = "(No info.json found in resources)"
+
+        try:
+            self.fixes_info.setPlainText(text)
+        except Exception:
+            pass
+
     def get_python_executable(self):
         p = shutil.which("python")
         if p:
@@ -675,24 +723,14 @@ class ModManager(QWidget):
         script_name = it.text().split(" [")[0]
         threading.Thread(target=self._run_fix_thread, args=(script_name,), daemon=True).start()
 
+    # Output widget removed; keep method name no-op for compatibility
     def clear_fixes_output(self):
-        self.fixes_output.clear()
+        return
 
     def send_fixes_input(self):
         """Send user input to the running process."""
-        if not self.fixes_process or not self.fixes_process.poll() is None:
-            self._append_output("[INPUT] No process running.")
-            self.fixes_input.clear()
-            return
-        try:
-            user_input = self.fixes_input.text() + "\n"
-            self._append_output(f"> {user_input.strip()}")
-            self.fixes_process.stdin.write(user_input.encode('utf-8'))
-            self.fixes_process.stdin.flush()
-            self.fixes_input.clear()
-        except Exception as e:
-            self._append_output(f"[ERROR] Failed to send input: {e}")
-            self.fixes_input.clear()
+        # Interactive input removed; scripts run in their own console windows.
+        return
 
     def _run_fix_thread(self, script_name):
         try:
@@ -766,9 +804,11 @@ class ModManager(QWidget):
 
     def _append_output(self, text):
         """Safely append text to output terminal from any thread."""
-        def do_append():
-            self.fixes_output.append(text)
-        QTimer.singleShot(0, do_append)
+        # Output widget removed; write to console instead
+        try:
+            print(text)
+        except Exception:
+            pass
 
     def toggle_auto_check(self, state):
         settings["auto_check_updates"] = bool(state)
@@ -1127,58 +1167,54 @@ class ModManager(QWidget):
         if self.selected_category != "characters":
             QMessageBox.warning(self, "Info", "Only characters can be added.")
             return
-        
-        # Prompt for character ID
-        char_id, ok = QLineEdit().text(), True
-        dlg = QMessageBox()
-        dlg.setWindowTitle("Add New Character")
-        dlg.setText("Enter character ID (unique identifier, e.g., 'fischl'):")
-        dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        
-        input_field = QLineEdit()
-        input_field.setPlaceholderText("e.g., fischl")
-        dlg.layout().insertWidget(0, input_field)
-        
-        if dlg.exec() == QMessageBox.StandardButton.Ok:
-            char_id = input_field.text().strip().lower()
-            if not char_id:
-                QMessageBox.warning(self, "Error", "Character ID cannot be empty.")
-                return
-            
-            # Prompt for character name
-            name_dlg = QMessageBox()
-            name_dlg.setWindowTitle("Add New Character")
-            name_dlg.setText("Enter character name (display name):")
-            name_dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-            
-            name_field = QLineEdit()
-            name_field.setPlaceholderText("e.g., Fischl")
-            name_dlg.layout().insertWidget(0, name_field)
-            
-            if name_dlg.exec() == QMessageBox.StandardButton.Ok:
-                char_name = name_field.text().strip()
-                if not char_name:
-                    QMessageBox.warning(self, "Error", "Character name cannot be empty.")
-                    return
-                
-                # Add to added characters
-                added_chars = load_added_characters(self.selected_game)
-                
-                # Check if ID already exists
-                if any(c["id"] == char_id for c in added_chars):
-                    QMessageBox.warning(self, "Error", f"Character '{char_id}' already exists.")
-                    return
-                
-                # Create new character entry
-                new_char = {
-                    "id": char_id,
-                    "name": char_name
-                }
-                added_chars.append(new_char)
-                save_added_characters(self.selected_game, added_chars)
-                
-                QMessageBox.information(self, "Success", f"Character '{char_name}' added successfully!")
-                self.load_items()
+        # Prompt for character ID using QInputDialog for robustness
+        char_id, ok = QInputDialog.getText(self, "Add New Character", "Enter character ID (unique identifier, e.g., 'fischl'):")
+        if not ok:
+            return
+        char_id = (char_id or "").strip().lower()
+        if not char_id:
+            QMessageBox.warning(self, "Error", "Character ID cannot be empty.")
+            return
+
+        # Prompt for display name
+        char_name, ok2 = QInputDialog.getText(self, "Add New Character", "Enter character display name (e.g., 'Fischl'):")
+        if not ok2:
+            return
+        char_name = (char_name or "").strip()
+        if not char_name:
+            QMessageBox.warning(self, "Error", "Character name cannot be empty.")
+            return
+
+        # Lowercase ID sanitization: no spaces
+        if " " in char_id:
+            QMessageBox.warning(self, "Error", "Character ID cannot contain spaces.")
+            return
+
+        # Check duplicates against default and previously added characters
+        default_file = os.path.join(RESOURCES, f"characters_{self.selected_game}.json")
+        existing_ids = set()
+        if os.path.exists(default_file):
+            try:
+                with open(default_file, "r", encoding="utf-8") as f:
+                    defaults = json.load(f)
+                    for c in defaults:
+                        existing_ids.add(c.get("id"))
+            except Exception:
+                pass
+        added_chars = load_added_characters(self.selected_game)
+        for c in added_chars:
+            existing_ids.add(c.get("id"))
+
+        if char_id in existing_ids:
+            QMessageBox.warning(self, "Error", f"Character ID '{char_id}' already exists.")
+            return
+
+        # Create and save new character
+        new_char = {"id": char_id, "name": char_name}
+        added_chars.append(new_char)
+        save_added_characters(self.selected_game, added_chars)
+        QMessageBox.information(self, "Success", f"Character '{char_name}' added successfully!")
+        self.load_items()
 
     # -------------------- LOAD MODS --------------------
     def clear_mod_list(self):
@@ -1432,17 +1468,20 @@ class ModManager(QWidget):
                     border: 1px solid #333; 
                 }
                 QTabBar::tab {
-                    background-color: #252525;
-                    border: 1px solid #333;
-                    padding: 8px 20px;
-                    color: #999;
+                    background-color: transparent;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 6px 12px;
+                    margin: 4px;
+                    min-width: 90px;
+                    color: #cfcfcf;
                 }
                 QTabBar::tab:selected {
                     background-color: #0078d4;
                     color: white;
                 }
                 QTabBar::tab:hover {
-                    background-color: #333;
+                    background-color: rgba(255,255,255,0.03);
                 }
                 QPushButton {
                     background-color: #0078d4;
@@ -1536,17 +1575,20 @@ class ModManager(QWidget):
                     border: 1px solid #ddd; 
                 }
                 QTabBar::tab {
-                    background-color: #efefef;
-                    border: 1px solid #ddd;
-                    padding: 8px 20px;
-                    color: #666;
+                    background-color: transparent;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 6px 12px;
+                    margin: 4px;
+                    min-width: 90px;
+                    color: #555;
                 }
                 QTabBar::tab:selected {
                     background-color: #0078d4;
                     color: white;
                 }
                 QTabBar::tab:hover {
-                    background-color: #e0e0e0;
+                    background-color: rgba(0,0,0,0.04);
                 }
                 QPushButton {
                     background-color: #0078d4;

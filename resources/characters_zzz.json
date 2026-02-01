@@ -41,6 +41,15 @@
   {"id": "yanagi", "name": "Yanagi"},
   {"id": "yixuan", "name": "Yixuan"},
   {"id": "zhuyuan", "name": "ZhuYuan"},
+  
+  {"id": "dialyn", "name": "Dialyn"},
+  {"id": "banyue", "name": "Banyue"},
+  {"id": "yidhari", "name": "Yidhari"},
+  {"id": "lucia", "name": "Lucia"},
+  {"id": "manato", "name": "Manato"},
+  {"id": "nangong_yu", "name": "Nangong Yu"},
+
+
 
   {"id": "agent_nicole_demara_cunning_cutie_portrait", "name": "Agent Nicole Demara Cunning Cutie Portrait"},
   {"id": "aliceseaofthyme", "name": "Alice Sea Of Thyme"},
@@ -52,5 +61,13 @@
   {"id": "wispeacefulwaves", "name": "Wise Peaceful Waves"},
   {"id": "wisesoaringcrane", "name": "Wise Soaring Crane"},
   {"id": "yixuantrailsofink", "name": "Yixuan Trails of Ink"},
-  {"id": "yuzuhatanukiinbroaddaylight", "name": "Yuzuha Tanuki In Broad Daylight"}
+  {"id": "yuzuhatanukiinbroaddaylight", "name": "Yuzuha Tanuki In Broad Daylight"},
+
+
+  {"id": "ye_shunguang", "name": "Ye Shunguang"},
+  {"id": "zhao", "name": "Zhao"},
+
+  
+  {"id": "sunna", "name": "Sunna"},
+  {"id": "aria", "name": "Aria"}
 ]

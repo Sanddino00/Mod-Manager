@@ -40,6 +40,7 @@
   {"id": "gorou", "name": "Gorou"},
   {"id": "hu_tao", "name": "Hu_Tao"},
   {"id": "iansan", "name": "Iansan"},
+  {"id": "illuga", "name": "Illuga"},
   {"id": "ineffa", "name": "Ineffa"},
   {"id": "jahoda", "name": "Jahoda"},
   {"id": "jean", "name": "Jean"},
@@ -110,6 +111,7 @@
   {"id": "yelan", "name": "Yelan"},
   {"id": "yoimiya", "name": "Yoimiya"},
   {"id": "yun_jin", "name": "Yun_Jin"},
+  {"id": "zibai", "name": "Zibai"},
   {"id": "zhongli", "name": "Zhongli"},
 
 
