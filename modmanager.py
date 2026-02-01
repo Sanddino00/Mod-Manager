@@ -1,4 +1,4 @@
-# Version 1.1.2
+# Version 1.2.0
 # modmanager.py - Mod Manager GUI with update checks and settings
 # NOTE: Designed to be run with Python 3.10+ and PyQt6 installed.
 # Uses only stdlib network (urllib) to avoid extra pip deps for update check.
@@ -13,11 +13,12 @@ import urllib.request
 import urllib.error
 import zipfile
 import tempfile
+import webbrowser
 from packaging import version as pkg_version  # packaging is often available; fallback handled below
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QComboBox, QTabWidget, QGridLayout, QScrollArea, QFrame, QFileDialog,
-    QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit
+    QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit, QTextEdit
 )
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtCore import Qt, QTimer
@@ -25,7 +26,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.1.2"  # keep in sync with settings default "version"
+SCRIPT_VERSION = "1.2.0"  # keep in sync with settings default "version"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -38,6 +39,17 @@ SETTINGS_FILE = os.path.join(RESOURCES, "settings.json")
 
 # -------------------- CONFIG --------------------
 GAMES = {"gi": "Genshin Impact", "hsr": "Honkai Star Rail", "wuwa": "Wuthering Waves", "zzz": "Zenless Zone Zero"}
+GAMEBANANA_URLS = {
+    "gi": "https://gamebanana.com/games/8552",
+    "hsr": "https://gamebanana.com/games/18366",
+    "wuwa": "https://gamebanana.com/games/20357",
+    "zzz": "https://gamebanana.com/games/19567",
+}
+RABBITFX_URLS = {
+    "wuwa": "https://gamebanana.com/mods/527815",
+    "hsr": "https://gamebanana.com/mods/608041",
+    "zzz": "https://gamebanana.com/mods/531649",
+}
 CATEGORIES = ["characters", "weapons", "ui", "objects", "npcs"]
 
 GITHUB_RELEASES_API = "https://api.github.com/repos/Sanddino00/Mod-Manager/releases/latest"
@@ -64,13 +76,17 @@ if not os.path.exists(SETTINGS_FILE):
     settings = {
         "mod_paths": default_mod_paths,
         "theme": "dark",  # Dark mode default
+            "script_targets": {},
         "version": SCRIPT_VERSION,
         "auto_check_updates": False,
         "last_release_tag": None,
         "install_path_info": None,  # path storage for installer/updater if needed
         "last_selected_game": "gi",
         "window_width": 1200,
-        "window_height": 800
+        "window_height": 800,
+        "window_x": 100,
+        "window_y": 100,
+        "favorites": {}  # {game: [item_ids]}
     }
     os.makedirs(RESOURCES, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
@@ -84,18 +100,23 @@ else:
             settings = {
                 "mod_paths": default_mod_paths,
                 "theme": "dark",
+                "script_targets": {},
                 "version": SCRIPT_VERSION,
                 "auto_check_updates": False,
                 "last_release_tag": None,
                 "install_path_info": None,
                 "last_selected_game": "gi",
                 "window_width": 1200,
-                "window_height": 800
+                "window_height": 800,
+                "favorites": {}
             }
 # After loading settings (both new and existing)
 if settings.get("version") != SCRIPT_VERSION:
     settings["version"] = SCRIPT_VERSION
     save_settings()
+settings.setdefault("script_targets", {})
+settings.setdefault("favorites", {})
+settings.setdefault("right_click_toggle_mods", False)
 
 # -------------------- WATCHDOG --------------------
 class ModFolderHandler(FileSystemEventHandler):
@@ -135,9 +156,52 @@ class ModListWidget(QListWidget):
         except Exception as e:
             print(f"Error dropping mod: {e}")
 
+    def contextMenuEvent(self, event):
+        # Right-click to toggle mod if enabled in settings
+        try:
+            if not getattr(self, 'mod_manager', None):
+                return
+            if not settings.get('right_click_toggle_mods', False):
+                return
+            item = self.itemAt(event.pos())
+            if not item:
+                return
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if not path:
+                return
+            # Toggle the mod at this path
+            try:
+                self.mod_manager.toggle_mod_by_path(path)
+            except Exception as e:
+                print(f"Failed to toggle via right-click: {e}")
+        except Exception:
+            pass
+
 # -------------------- UTILITIES --------------------
 
+def get_added_characters_file(game):
+    """Get the path to the addedCharacters JSON file for a specific game."""
+    return os.path.join(RESOURCES, f"addedCharacters_{game}.json")
 
+def load_added_characters(game):
+    """Load added characters from the game's addedCharacters JSON file."""
+    file_path = get_added_characters_file(game)
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_added_characters(game, characters):
+    """Save added characters to the game's addedCharacters JSON file."""
+    file_path = get_added_characters_file(game)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(characters, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Failed to save added characters for {game}: {e}")
 
 def semver_normalize(tag):
     """Strip leading 'v' and return normalized semver string."""
@@ -231,6 +295,14 @@ class ModManager(QWidget):
         width = settings.get("window_width", 1200)
         height = settings.get("window_height", 800)
         self.resize(width, height)
+        # Load window position if present
+        wx = settings.get("window_x")
+        wy = settings.get("window_y")
+        if isinstance(wx, int) and isinstance(wy, int):
+            try:
+                self.move(wx, wy)
+            except Exception:
+                pass
         # Load last selected game from settings
         self.selected_game = settings.get("last_selected_game", "gi")
         self.selected_category = "characters"
@@ -257,6 +329,12 @@ class ModManager(QWidget):
 
         # Top: Game selection + update dot
         top_layout = QHBoxLayout()
+        # GameBanana quick link button
+        self.gamebanana_btn = QPushButton("GB")
+        self.gamebanana_btn.setToolTip("Open selected game's GameBanana page")
+        self.gamebanana_btn.setFixedWidth(40)
+        self.gamebanana_btn.clicked.connect(self.open_gamebanana)
+
         self.game_combo = QComboBox()
         for k,v in GAMES.items():
             self.game_combo.addItem(v,k)
@@ -265,6 +343,7 @@ class ModManager(QWidget):
 
         top_layout.addStretch()
         top_layout.addWidget(QLabel("Select Game:"))
+        top_layout.addWidget(self.gamebanana_btn)
         top_layout.addWidget(self.game_combo)
         
         # Search bar
@@ -318,10 +397,36 @@ class ModManager(QWidget):
             content.setLayout(grid)
             scroll.setWidget(content)
             layout = QVBoxLayout()
+            
+            # Add button for characters category
+            if cat == "characters":
+                btn_add_char = QPushButton("➕ Add Character")
+                btn_add_char.setStyleSheet("""
+                    QPushButton {
+                        background-color: #0078d4;
+                        color: white;
+                        border-radius: 4px;
+                        padding: 8px;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #1084e0;
+                    }
+                """)
+                btn_add_char.clicked.connect(self.add_new_character)
+                layout.addWidget(btn_add_char)
+            
             layout.addWidget(scroll)
             tab.setLayout(layout)
             self.tab_widget.addTab(tab, cat.capitalize())
             self.tabs[cat] = {"tab": tab, "grid": grid, "scroll": scroll, "content": content}
+
+        # Fixes tab (scripts runner)
+        self.fixes_tab = QWidget()
+        self.fixes_layout = QVBoxLayout()
+        self.fixes_tab.setLayout(self.fixes_layout)
+        self.tab_widget.addTab(self.fixes_tab, "Fixes")
+        self.create_fixes_tab()
 
         # Settings tab
         self.settings_tab = QWidget()
@@ -416,6 +521,15 @@ class ModManager(QWidget):
         self.auto_check_box.stateChanged.connect(self.toggle_auto_check)
         self.settings_layout.addWidget(self.auto_check_box)
 
+        # Right-click toggle mods
+        self.right_click_toggle_box = QCheckBox("Right-click toggles enable/disable mods")
+        self.right_click_toggle_box.setChecked(settings.get("right_click_toggle_mods", False))
+        def _rc_changed(state):
+            settings['right_click_toggle_mods'] = bool(state)
+            save_settings()
+        self.right_click_toggle_box.stateChanged.connect(_rc_changed)
+        self.settings_layout.addWidget(self.right_click_toggle_box)
+
         # Version display (centered)
         v_layout = QHBoxLayout()
         v_layout.addStretch()
@@ -450,6 +564,212 @@ class ModManager(QWidget):
         # Spacer
         self.settings_layout.addStretch()
 
+    # -------------------- FIXES TAB (scripts runner) --------------------
+    def create_fixes_tab(self):
+        # target label
+        tgt = settings.get("script_targets", {}).get(self.selected_game,
+                                                      settings.get("mod_paths", {}).get(self.selected_game, "No target selected"))
+        self.fixes_target_label = QLabel(tgt)
+        self.fixes_layout.addWidget(QLabel("Target Folder:"))
+        self.fixes_layout.addWidget(self.fixes_target_label)
+
+        row = QHBoxLayout()
+        btn_sel = QPushButton("Select Target Folder")
+        btn_sel.clicked.connect(self.select_fixes_target_folder)
+        row.addWidget(btn_sel)
+        btn_refresh = QPushButton("Refresh Scripts")
+        btn_refresh.clicked.connect(self.populate_fixes_scripts)
+        row.addWidget(btn_refresh)
+        # Download RabbitFX button (per-game links)
+        btn_rabbit = QPushButton("Download RabbitFX")
+        btn_rabbit.clicked.connect(self.open_rabbitfx)
+        row.addWidget(btn_rabbit)
+        self.fixes_layout.addLayout(row)
+
+        self.fixes_list = QListWidget()
+        self.fixes_list.setMaximumHeight(200)
+        self.fixes_list.itemSelectionChanged.connect(self.on_fixes_selection_changed)
+        self.fixes_layout.addWidget(self.fixes_list)
+
+        self.fixes_run_btn = QPushButton("Run Selected Fix")
+        self.fixes_run_btn.setEnabled(False)
+        self.fixes_run_btn.clicked.connect(self.run_selected_fix)
+        self.fixes_layout.addWidget(self.fixes_run_btn)
+
+        # Terminal output display
+        self.fixes_output = QTextEdit()
+        self.fixes_output.setReadOnly(True)
+        self.fixes_output.setStyleSheet("background-color: #111; color: #0f0; font-family: Courier;")
+        self.fixes_layout.addWidget(QLabel("Output:"))
+        self.fixes_layout.addWidget(self.fixes_output, 1)  # stretch to fill remaining space
+
+        # Input field for interactive prompts
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(QLabel("Input:"))
+        self.fixes_input = QLineEdit()
+        self.fixes_input.setPlaceholderText("Enter input for prompts (e.g., yes/no) and press Enter")
+        self.fixes_input.returnPressed.connect(self.send_fixes_input)
+        input_layout.addWidget(self.fixes_input)
+        self.fixes_layout.addLayout(input_layout)
+
+        # Clear output button
+        btn_clear = QPushButton("Clear Output")
+        btn_clear.clicked.connect(self.clear_fixes_output)
+        self.fixes_layout.addWidget(btn_clear)
+
+        self.fixes_process = None  # Will hold subprocess.Popen instance
+        self.fixes_thread = None  # Will hold reader thread
+        QTimer.singleShot(100, self.populate_fixes_scripts)
+
+    def select_fixes_target_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Target Folder")
+        if folder:
+            settings.setdefault("script_targets", {})[self.selected_game] = folder
+            save_settings()
+            self.fixes_target_label.setText(folder)
+            self.validate_fixes_run_button()
+
+    def update_fixes_tab(self):
+        """Update Fixes tab when game is changed - load saved target path and refresh scripts."""
+        tgt = settings.get("script_targets", {}).get(self.selected_game,
+                                                      settings.get("mod_paths", {}).get(self.selected_game, "No target selected"))
+        self.fixes_target_label.setText(tgt)
+        self.populate_fixes_scripts()
+
+    def populate_fixes_scripts(self):
+        self.fixes_list.clear()
+        sub = self.selected_game
+        folder = os.path.join(RESOURCES, sub)
+        if os.path.exists(folder):
+            try:
+                for f in sorted(os.listdir(folder)):
+                    if f.endswith('.py'):
+                        self.fixes_list.addItem(f"{f} [PY]")
+                    elif f.endswith('.exe'):
+                        self.fixes_list.addItem(f"{f} [EXE]")
+            except Exception:
+                pass
+        self.validate_fixes_run_button()
+
+    def on_fixes_selection_changed(self):
+        self.validate_fixes_run_button()
+
+    def validate_fixes_run_button(self):
+        sel = self.fixes_list.currentItem()
+        target = settings.get("script_targets", {}).get(self.selected_game) or settings.get("mod_paths", {}).get(self.selected_game)
+        self.fixes_run_btn.setEnabled(bool(sel and target))
+
+    def get_python_executable(self):
+        p = shutil.which("python")
+        if p:
+            return p
+        if sys.executable and os.path.basename(sys.executable).lower().startswith("python"):
+            return sys.executable
+        return None
+
+    def run_selected_fix(self):
+        it = self.fixes_list.currentItem()
+        if not it:
+            QMessageBox.warning(self, "Warning", "Select a script first.")
+            return
+        script_name = it.text().split(" [")[0]
+        threading.Thread(target=self._run_fix_thread, args=(script_name,), daemon=True).start()
+
+    def clear_fixes_output(self):
+        self.fixes_output.clear()
+
+    def send_fixes_input(self):
+        """Send user input to the running process."""
+        if not self.fixes_process or not self.fixes_process.poll() is None:
+            self._append_output("[INPUT] No process running.")
+            self.fixes_input.clear()
+            return
+        try:
+            user_input = self.fixes_input.text() + "\n"
+            self._append_output(f"> {user_input.strip()}")
+            self.fixes_process.stdin.write(user_input.encode('utf-8'))
+            self.fixes_process.stdin.flush()
+            self.fixes_input.clear()
+        except Exception as e:
+            self._append_output(f"[ERROR] Failed to send input: {e}")
+            self.fixes_input.clear()
+
+    def _run_fix_thread(self, script_name):
+        try:
+            src = os.path.join(RESOURCES, self.selected_game, script_name)
+            if not os.path.exists(src):
+                self._append_output(f"ERROR: Script not found: {src}")
+                return
+
+            target = settings.get("script_targets", {}).get(self.selected_game) or settings.get("mod_paths", {}).get(self.selected_game)
+            if not target:
+                self._append_output("ERROR: No target folder configured.")
+                return
+
+            dst = os.path.join(target, script_name)
+            try:
+                shutil.copy(src, dst)
+                self._append_output(f"[INFO] Copied {script_name} to {target}")
+            except Exception as e:
+                self._append_output(f"[ERROR] Copy failed: {e}")
+                return
+
+            try:
+                proc = None
+                if script_name.endswith('.py'):
+                    py = self.get_python_executable()
+                    if not py:
+                        self._append_output("[ERROR] Python executable not found.")
+                        return
+                    self._append_output(f"[INFO] Running: {script_name}")
+                    # Launch in a new console window on Windows with proper working directory
+                    if sys.platform == "win32":
+                        # Use cmd to ensure working directory is set correctly
+                        proc = subprocess.Popen(
+                            ['cmd', '/k', f'cd /d {target} && python {script_name}'],
+                            creationflags=subprocess.CREATE_NEW_CONSOLE
+                        )
+                    else:
+                        proc = subprocess.Popen([py, dst], cwd=target)
+                    self._append_output("[INFO] Script opened in a new window. Interact with it there.")
+                else:
+                    self._append_output(f"[INFO] Running: {script_name}")
+                    if sys.platform == "win32":
+                        proc = subprocess.Popen(
+                            ['cmd', '/k', f'cd /d {target} && {script_name}'],
+                            creationflags=subprocess.CREATE_NEW_CONSOLE
+                        )
+                    else:
+                        proc = subprocess.Popen([dst], cwd=target)
+                    self._append_output("[INFO] Script opened in a new window. Interact with it there.")
+                
+                # Wait for the script to complete
+                if proc:
+                    proc.wait()
+                    self._append_output(f"[INFO] Script completed with exit code: {proc.returncode}")
+                    
+            except Exception as e:
+                self._append_output(f"[ERROR] {e}")
+            finally:
+                # Clean up: delete the copied script
+                try:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                        self._append_output(f"[INFO] Cleaned up: {script_name}")
+                except Exception as e:
+                    self._append_output(f"[WARNING] Could not delete {script_name}: {e}")
+
+        except Exception as e:
+            self._append_output(f"[ERROR] {e}")
+
+
+
+    def _append_output(self, text):
+        """Safely append text to output terminal from any thread."""
+        def do_append():
+            self.fixes_output.append(text)
+        QTimer.singleShot(0, do_append)
+
     def toggle_auto_check(self, state):
         settings["auto_check_updates"] = bool(state)
         save_settings()
@@ -468,6 +788,34 @@ class ModManager(QWidget):
         settings["last_selected_game"] = self.selected_game
         save_settings()
         self.load_items()
+        try:
+            self.update_fixes_tab()
+        except Exception:
+            pass
+
+    def open_gamebanana(self):
+        """Open the GameBanana page for the currently selected game."""
+        key = self.game_combo.currentData()
+        url = GAMEBANANA_URLS.get(key)
+        if url:
+            try:
+                webbrowser.open(url)
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to open browser: {e}")
+        else:
+            QMessageBox.information(self, "Info", "No GameBanana page configured for this game.")
+
+    def open_rabbitfx(self):
+        """Open the RabbitFX (GameBanana mod) page for supported games."""
+        key = self.game_combo.currentData()
+        url = RABBITFX_URLS.get(key)
+        if url:
+            try:
+                webbrowser.open(url)
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to open browser: {e}")
+        else:
+            QMessageBox.information(self, "Info", "No RabbitFX download configured for this game.")
 
     def tab_changed(self,index):
         if index < len(CATEGORIES):
@@ -499,6 +847,15 @@ class ModManager(QWidget):
                 self.items = []
         else:
             self.items = []
+
+        # Load added characters if this is the characters category
+        if self.selected_category == "characters":
+            added = load_added_characters(self.selected_game)
+            self.items.extend(added)
+
+        # Sort items: favorites first, then by name
+        favorites = settings.get("favorites", {}).get(self.selected_game, [])
+        self.items.sort(key=lambda x: (x["id"] not in favorites, x.get("name", "")))
 
         # Create main category folder if needed (ask user first)
         base_path = settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game])
@@ -539,6 +896,74 @@ class ModManager(QWidget):
         # Store item data on frame for drag/drop
         frame.character_data = {"game": self.selected_game, "category": self.selected_category, "item": item}
 
+        # Modern styling for the frame (theme-aware)
+        frame.setFrameShape(QFrame.Shape.Box)
+        if settings.get("theme", "dark") == "dark":
+            frame_style = """
+                QFrame {
+                    border: 2px solid #444;
+                    border-radius: 8px;
+                    background-color: #222;
+                    padding: 8px;
+                }
+                QFrame:hover {
+                    border: 2px solid #0078d4;
+                    background-color: #2a2a2a;
+                }
+            """
+        else:
+            frame_style = """
+                QFrame {
+                    border: 2px solid #ccc;
+                    border-radius: 8px;
+                    background-color: #f5f5f5;
+                    padding: 8px;
+                }
+                QFrame:hover {
+                    border: 2px solid #0078d4;
+                    background-color: #ffffff;
+                }
+            """
+        frame.setStyleSheet(frame_style)
+        
+        # Top row: Favorite button + warning
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 5)
+        fav_btn = QPushButton()
+        fav_btn.setMaximumWidth(30)
+        fav_btn.setMaximumHeight(30)
+        favorites = settings.get("favorites", {}).get(self.selected_game, [])
+        is_fav = item["id"] in favorites
+        fav_btn.setText("⭐" if is_fav else "☆")
+        fav_btn.setStyleSheet("""QPushButton { 
+            background: transparent; 
+            border: none; 
+            font-size: 18px;
+            padding: 2px;
+        }
+        QPushButton:hover {
+            opacity: 0.8;
+        }
+        """)
+        fav_btn.clicked.connect(lambda: self.toggle_favorite(item))
+
+        # Warning label (placed next to favorite) - hidden by default
+        warning_label = QLabel()
+        warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Theme-aware color and transparent background to avoid dark/black patches
+        if settings.get("theme", "dark") == "dark":
+            warn_color = "#ff6b6b"
+        else:
+            warn_color = "#b00020"
+        warning_label.setStyleSheet(f"background-color: transparent; color: {warn_color}; font-weight: bold; font-size: 12px;")
+        warning_label.setMaximumHeight(0)
+        warning_label.setContentsMargins(4, 0, 6, 0)
+
+        top_row.addWidget(fav_btn)
+        top_row.addWidget(warning_label)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
         # Icon
         icon_path = os.path.join(
             RESOURCES,
@@ -556,31 +981,46 @@ class ModManager(QWidget):
             except Exception:
                 pass
 
-        # Name label
+        # Name label with modern styling
         name_label = QLabel(item['name'])
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setStyleSheet("color: #fff; font-weight: bold; font-size: 11px;")
         layout.addWidget(name_label)
 
         # Mod counter label
         counter_label = QLabel()
         counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        counter_label.setStyleSheet("color: #0078d4; font-size: 10px;")
         layout.addWidget(counter_label)
         item['_counter_label'] = counter_label
 
-        # Warning label for multiple enabled mods (only characters/weapons)
-        warning_label = QLabel()
-        warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        warning_label.setStyleSheet("color: red; font-weight: bold;")
-        layout.addWidget(warning_label)
+        # Attach warning_label created above to item for updates
         item['_warning_label'] = warning_label
 
         self.update_mod_counter(item)
 
         # Click to select
-        frame.setFrameShape(QFrame.Shape.Box)
         frame.mousePressEvent = lambda e, i=item: self.select_item(i)
         
         return frame
+
+    def toggle_favorite(self, item):
+        """Toggle favorite status for an item."""
+        if "characters" not in self.selected_category:
+            QMessageBox.information(self, "Info", "Favorites are only available for characters.")
+            return
+            
+        settings.setdefault("favorites", {})
+        settings["favorites"].setdefault(self.selected_game, [])
+        
+        if item["id"] in settings["favorites"][self.selected_game]:
+            settings["favorites"][self.selected_game].remove(item["id"])
+        else:
+            settings["favorites"][self.selected_game].append(item["id"])
+        
+        save_settings()
+        self.load_items()  # Refresh to reorder by favorites
+
 
     def import_mod_from_path(self, source_path):
         """Import a mod folder from an external path to the selected character folder."""
@@ -682,6 +1122,64 @@ class ModManager(QWidget):
         self.selected_item = item
         self.load_mods()
 
+    def add_new_character(self):
+        """Add a new character to the game."""
+        if self.selected_category != "characters":
+            QMessageBox.warning(self, "Info", "Only characters can be added.")
+            return
+        
+        # Prompt for character ID
+        char_id, ok = QLineEdit().text(), True
+        dlg = QMessageBox()
+        dlg.setWindowTitle("Add New Character")
+        dlg.setText("Enter character ID (unique identifier, e.g., 'fischl'):")
+        dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        
+        input_field = QLineEdit()
+        input_field.setPlaceholderText("e.g., fischl")
+        dlg.layout().insertWidget(0, input_field)
+        
+        if dlg.exec() == QMessageBox.StandardButton.Ok:
+            char_id = input_field.text().strip().lower()
+            if not char_id:
+                QMessageBox.warning(self, "Error", "Character ID cannot be empty.")
+                return
+            
+            # Prompt for character name
+            name_dlg = QMessageBox()
+            name_dlg.setWindowTitle("Add New Character")
+            name_dlg.setText("Enter character name (display name):")
+            name_dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            
+            name_field = QLineEdit()
+            name_field.setPlaceholderText("e.g., Fischl")
+            name_dlg.layout().insertWidget(0, name_field)
+            
+            if name_dlg.exec() == QMessageBox.StandardButton.Ok:
+                char_name = name_field.text().strip()
+                if not char_name:
+                    QMessageBox.warning(self, "Error", "Character name cannot be empty.")
+                    return
+                
+                # Add to added characters
+                added_chars = load_added_characters(self.selected_game)
+                
+                # Check if ID already exists
+                if any(c["id"] == char_id for c in added_chars):
+                    QMessageBox.warning(self, "Error", f"Character '{char_id}' already exists.")
+                    return
+                
+                # Create new character entry
+                new_char = {
+                    "id": char_id,
+                    "name": char_name
+                }
+                added_chars.append(new_char)
+                save_added_characters(self.selected_game, added_chars)
+                
+                QMessageBox.information(self, "Success", f"Character '{char_name}' added successfully!")
+                self.load_items()
+
     # -------------------- LOAD MODS --------------------
     def clear_mod_list(self):
         self.mod_list_widget.clear()
@@ -772,15 +1270,18 @@ class ModManager(QWidget):
         if '_counter_label' in item:
             item['_counter_label'].setText(f"Mods: {count}")
 
-        # Update warning only for characters and weapons
+        # Update warning only for characters - show/hide based on content
         if '_warning_label' in item:
-            if self.selected_category in ("characters", "weapons"):
+            if self.selected_category == "characters":
                 if enabled_count > 1:
                     item['_warning_label'].setText("⚠ More than 1 mod enabled!")
+                    item['_warning_label'].setMaximumHeight(20)  # Show
                 else:
                     item['_warning_label'].setText("")
+                    item['_warning_label'].setMaximumHeight(0)  # Hide
             else:
                 item['_warning_label'].setText("")
+                item['_warning_label'].setMaximumHeight(0)  # Hide
 
     # -------------------- SELECT MOD --------------------
     def select_mod(self, list_item):
@@ -880,6 +1381,23 @@ class ModManager(QWidget):
             print(f"Failed to rename folder: {e}")
         self.load_mods()
 
+    def toggle_mod_by_path(self, path):
+        """Toggle a mod folder given its full path."""
+        if not path or not os.path.exists(path):
+            return
+        parent_folder = os.path.dirname(path)
+        folder_name = os.path.basename(path)
+        if folder_name.startswith("DISABLED_"):
+            new_name = folder_name.replace("DISABLED_", "", 1)
+        else:
+            new_name = f"DISABLED_{folder_name}"
+        new_path = os.path.join(parent_folder, new_name)
+        try:
+            os.rename(path, new_path)
+        except Exception as e:
+            print(f"Failed to toggle folder: {e}")
+        self.load_mods()
+
     # -------------------- OPEN FOLDER --------------------
     def open_selected_folder(self):
         if not self.selected_item:
@@ -900,27 +1418,192 @@ class ModManager(QWidget):
 
     def apply_theme(self):
         if settings.get("theme","dark")=="dark":
+            # Modern dark theme inspired by IMM/JASM
             self.setStyleSheet("""
-                QWidget { background-color: #222; color: #eee; }
-                QScrollArea { background-color: #222; }
-                QTabWidget::pane { background: #222; }
-                QLabel, QPushButton, QComboBox, QListWidget { color: #eee; }
-                QListWidget::item:selected { background-color: #555555; color: #ffffff; }
-                QScrollArea::viewport { background-color: #222; }
-                QScrollArea > QWidget { background-color: #222; }
-                QLabel { background-color: transparent; }
+                QWidget { 
+                    background-color: #1a1a1a; 
+                    color: #e0e0e0; 
+                }
+                QMainWindow { 
+                    background-color: #1a1a1a; 
+                }
+                QTabWidget::pane { 
+                    background: #1a1a1a; 
+                    border: 1px solid #333; 
+                }
+                QTabBar::tab {
+                    background-color: #252525;
+                    border: 1px solid #333;
+                    padding: 8px 20px;
+                    color: #999;
+                }
+                QTabBar::tab:selected {
+                    background-color: #0078d4;
+                    color: white;
+                }
+                QTabBar::tab:hover {
+                    background-color: #333;
+                }
+                QPushButton {
+                    background-color: #0078d4;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #1084e0;
+                }
+                QPushButton:pressed {
+                    background-color: #005a9e;
+                }
+                QLineEdit, QComboBox {
+                    background-color: #2a2a2a;
+                    color: #e0e0e0;
+                    border: 1px solid #444;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+                QLineEdit:focus, QComboBox:focus {
+                    border: 2px solid #0078d4;
+                }
+                QListWidget {
+                    background-color: #2a2a2a;
+                    color: #e0e0e0;
+                    border: 1px solid #444;
+                    border-radius: 4px;
+                }
+                QListWidget::item {
+                    padding: 6px;
+                    margin: 2px;
+                    border-radius: 3px;
+                }
+                QListWidget::item:selected {
+                    background-color: #0078d4;
+                    color: #ffffff;
+                }
+                QListWidget::item:hover {
+                    background-color: #333;
+                }
+                QScrollArea { 
+                    background-color: #1a1a1a; 
+                    border: none;
+                }
+                QScrollArea::viewport { 
+                    background-color: #1a1a1a; 
+                }
+                QScrollBar:vertical {
+                    background-color: #2a2a2a;
+                    border: none;
+                    width: 12px;
+                }
+                QScrollBar::handle:vertical {
+                    background-color: #555;
+                    border-radius: 6px;
+                    min-height: 20px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background-color: #0078d4;
+                }
+                QLabel { 
+                    background-color: transparent; 
+                    color: #e0e0e0;
+                }
+                QCheckBox {
+                    color: #e0e0e0;
+                }
+                QCheckBox::indicator {
+                    border: 1px solid #444;
+                    border-radius: 3px;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #0078d4;
+                }
             """)
         else:
+            # Modern light theme
             self.setStyleSheet("""
-                QWidget { background-color: #d3d3d3; color: #222; }  /* Light gray background */
-                QScrollArea { background-color: #d3d3d3; }
-                QTabWidget::pane { background: #ccc; }
-                QLabel, QPushButton, QComboBox { color: #222; }
-                QListWidget { background-color: #444444; color: #ffffff; } /* Dark gray mod list */
-                QListWidget::item:selected { background-color: #666666; color: #ffffff; }
-                QScrollArea::viewport { background-color: #d3d3d3; }
-                QScrollArea > QWidget { background-color: #d3d3d3; }
-                QLabel { background-color: transparent; }
+                QWidget { 
+                    background-color: #f5f5f5; 
+                    color: #222; 
+                }
+                QMainWindow { 
+                    background-color: #f5f5f5; 
+                }
+                QTabWidget::pane { 
+                    background: #f5f5f5; 
+                    border: 1px solid #ddd; 
+                }
+                QTabBar::tab {
+                    background-color: #efefef;
+                    border: 1px solid #ddd;
+                    padding: 8px 20px;
+                    color: #666;
+                }
+                QTabBar::tab:selected {
+                    background-color: #0078d4;
+                    color: white;
+                }
+                QTabBar::tab:hover {
+                    background-color: #e0e0e0;
+                }
+                QPushButton {
+                    background-color: #0078d4;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #1084e0;
+                }
+                QPushButton:pressed {
+                    background-color: #005a9e;
+                }
+                QLineEdit, QComboBox {
+                    background-color: white;
+                    color: #222;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    padding: 6px;
+                }
+                QLineEdit:focus, QComboBox:focus {
+                    border: 2px solid #0078d4;
+                }
+                QListWidget {
+                    background-color: white;
+                    color: #222;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                }
+                QListWidget::item {
+                    padding: 6px;
+                    margin: 2px;
+                    border-radius: 3px;
+                }
+                QListWidget::item:selected {
+                    background-color: #0078d4;
+                    color: white;
+                }
+                QListWidget::item:hover {
+                    background-color: #e8e8e8;
+                }
+                QScrollArea { 
+                    background-color: #f5f5f5; 
+                    border: none;
+                }
+                QScrollArea::viewport { 
+                    background-color: #f5f5f5; 
+                }
+                QLabel { 
+                    background-color: transparent; 
+                    color: #222;
+                }
+                QCheckBox {
+                    color: #222;
+                }
             """)
 
     def on_search_text_changed(self, text):
@@ -1063,6 +1746,13 @@ class ModManager(QWidget):
         # Save window size
         settings["window_width"] = self.width()
         settings["window_height"] = self.height()
+        # Save window position
+        try:
+            pos = self.pos()
+            settings["window_x"] = int(pos.x())
+            settings["window_y"] = int(pos.y())
+        except Exception:
+            pass
         # Save selected game
         settings["last_selected_game"] = self.selected_game
         save_settings()
@@ -1088,24 +1778,28 @@ class ModManager(QWidget):
     def _check_updates_and_update_ui(self):
         # cancel pending timeout (scheduled on main thread) so it won't override results
         QTimer.singleShot(0, self._cancel_update_timeout)
-        latest = fetch_latest_release_info()
-        if not latest:
-            # can't fetch - show red
-            self.set_update_status(False, "Unable to check")
-            return
-        tag = latest.get("tag_name") or latest.get("name")
-        tag_norm = semver_normalize(tag)
-        installed = semver_normalize(SCRIPT_VERSION)
+        try:
+            latest = fetch_latest_release_info()
+            if not latest:
+                # can't fetch - show red
+                QTimer.singleShot(0, lambda: self.set_update_status(False, "Unable to check"))
+                return
+            tag = latest.get("tag_name") or latest.get("name")
+            tag_norm = semver_normalize(tag)
+            installed = semver_normalize(SCRIPT_VERSION)
 
-        if tag_norm and installed and is_version_newer(installed, tag_norm):
-            settings["last_release_tag"] = tag
-            save_settings()
-            self.set_update_status(True, f"Update available ({tag})")
-        else:
-            # no update
-            settings["last_release_tag"] = tag
-            save_settings()
-            self.set_update_status(False, "Up to date")
+            if tag_norm and installed and is_version_newer(installed, tag_norm):
+                settings["last_release_tag"] = tag
+                save_settings()
+                QTimer.singleShot(0, lambda: self.set_update_status(True, f"Update available ({tag})"))
+            else:
+                # no update
+                settings["last_release_tag"] = tag
+                save_settings()
+                QTimer.singleShot(0, lambda: self.set_update_status(False, "Up to date"))
+        except Exception as e:
+            print(f"Error in update check: {e}")
+            QTimer.singleShot(0, lambda: self.set_update_status(False, "Error checking"))
 
     def set_update_status(self, available: bool, label_text: str):
         # must call from main thread — use QTimer.singleShot to schedule
