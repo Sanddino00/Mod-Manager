@@ -78,8 +78,6 @@ Also feel free modify the mod manager in any way you like. ---------------------
 <img width="415" height="334" alt="image" src="https://github.com/user-attachments/assets/5edde990-b988-4cce-849e-387951a6f305" />
 
 To do list:
-- Fixing the light mode
-- Fixing the more than one mod enabled warning
 - Fixing the auto update funktion
 - adding Endfield support
 - Adding missing Character and Icons
