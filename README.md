@@ -5,6 +5,12 @@ This mod manager also comes with a manager for the character/mod fixes and the f
 This modmanager allows you to either enable or disable mods with right click or the seperate button above the mod list. It dis-/enables mods by renaming the individual mod folder to DISABLED_Modname to disable and removes the DISABLED_ to reanable the mod
 
 <img width="2632" height="1259" alt="image" src="https://github.com/user-attachments/assets/e483706c-1789-4ba2-b436-b5c5d239f95b" />
+There are six sections for each game to make the mod folder more structured (character, weapons, ui, objects, npcs and fixes) 
+Note fixes are stored inside the resources folder of the mod manager  
+
+  
+<img width="129" height="485" alt="image" src="https://github.com/user-attachments/assets/49c5c117-dcff-4a32-93da-a04897bee235" />
+<img width="816" height="297" alt="image" src="https://github.com/user-attachments/assets/a8cb0c01-0f74-4c1f-b577-aabddfb97696" />
 
 
 Features:
@@ -38,3 +44,9 @@ Searches for png,jpeg, jpg and web files in the individual mod folders as previe
 
 Clearly labeling DISABLED mods and live refreshing list
 
+7. Fix tool manager / applier
+<img width="1263" height="953" alt="image" src="https://github.com/user-attachments/assets/dec9076e-a6f6-4d89-91ec-6aa1361ed07b" />
+To use a fix tool select a folder, select a fix tool and press run fix. It opens a terminal window to use the py scripts / being used as output for the exe versions and to answer prompts
+The fix section also includes a download button which links to the gamebanana side of rabbitfx which many/most mods in wuwa and zzz need.
+<img width="1168" height="815" alt="image" src="https://github.com/user-attachments/assets/e1770981-9f53-4c67-bece-230048bdcd90" />
+It will only show fixes related to the selected game. 
