@@ -9,7 +9,7 @@ This modmanager allows you to either enable or disable mods with right click or 
 <img width="2632" height="1259" alt="image" src="https://github.com/user-attachments/assets/e483706c-1789-4ba2-b436-b5c5d239f95b" />
 There are six sections for each game to make the mod folder more structured (character, weapons, ui, objects, npcs and fixes) 
 Note fixes are stored inside the resources folder of the mod manager  
--------------------------------------------------------------------------------------------------
+------------------------------------------------------------------
 <img width="129" height="485" alt="image" src="https://github.com/user-attachments/assets/49c5c117-dcff-4a32-93da-a04897bee235" />
 <img width="816" height="297" alt="image" src="https://github.com/user-attachments/assets/a8cb0c01-0f74-4c1f-b577-aabddfb97696" />
 
