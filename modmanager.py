@@ -1,4 +1,4 @@
-# Version 1.2.1
+# Version 1.2.2
 # modmanager.py - Mod Manager GUI with update checks and settings
 # NOTE: Designed to be run with Python 3.10+ and PyQt6 installed.
 # Uses only stdlib network (urllib) to avoid extra pip deps for update check.
@@ -27,7 +27,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.2.1"  # keep in sync with settings default "version"
+SCRIPT_VERSION = "1.2.2"  # keep in sync with settings default "version"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -39,17 +39,19 @@ os.makedirs(RESOURCES, exist_ok=True)
 SETTINGS_FILE = os.path.join(RESOURCES, "settings.json")
 
 # -------------------- CONFIG --------------------
-GAMES = {"gi": "Genshin Impact", "hsr": "Honkai Star Rail", "wuwa": "Wuthering Waves", "zzz": "Zenless Zone Zero"}
+GAMES = {"gi": "Genshin Impact", "hsr": "Honkai Star Rail", "wuwa": "Wuthering Waves", "zzz": "Zenless Zone Zero", "end": "Endfield"}
 GAMEBANANA_URLS = {
     "gi": "https://gamebanana.com/games/8552",
     "hsr": "https://gamebanana.com/games/18366",
     "wuwa": "https://gamebanana.com/games/20357",
     "zzz": "https://gamebanana.com/games/19567",
+    "end": "https://gamebanana.com/games/21842",
 }
 RABBITFX_URLS = {
     "wuwa": "https://gamebanana.com/mods/527815",
     "hsr": "https://gamebanana.com/mods/608041",
     "zzz": "https://gamebanana.com/mods/531649",
+    "end": "https://gamebanana.com/mods/651557",
 }
 CATEGORIES = ["characters", "weapons", "ui", "objects", "npcs"]
 
@@ -70,7 +72,8 @@ default_mod_paths = {
     "gi": os.path.join(BASE_DIR, "gimi", "mods"),
     "hsr": os.path.join(BASE_DIR, "srmi", "mods"),
     "wuwa": os.path.join(BASE_DIR, "wwmi", "mods"),
-    "zzz": os.path.join(BASE_DIR, "zzmi", "mods")
+    "zzz": os.path.join(BASE_DIR, "zzmi", "mods"),
+    "end": os.path.join(BASE_DIR, "efmi", "mods")
 }
 
 if not os.path.exists(SETTINGS_FILE):
@@ -204,6 +207,64 @@ def save_added_characters(game, characters):
     except Exception as e:
         print(f"Failed to save added characters for {game}: {e}")
 
+
+def get_favorites_file(game):
+    """Return the per-game favorites filename (JSON). Example: resources/gi_fav_char.json"""
+    return os.path.join(RESOURCES, f"{game}_fav_char.json")
+
+
+def load_favorites(game):
+    """Load favorites for a specific game from its JSON file.
+
+    Falls back to the in-settings favorites entry for backward compatibility.
+    Returns a list of item ids.
+    """
+    file_path = get_favorites_file(game)
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            return []
+    # fallback to old settings store
+    return settings.get("favorites", {}).get(game, [])
+
+
+def save_favorites(game, fav_list):
+    """Save favorites list for a specific game to its JSON file."""
+    file_path = get_favorites_file(game)
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(fav_list, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Failed to save favorites for {game}: {e}")
+
+
+# Migrate any existing favorites stored in settings.json into per-game files.
+try:
+    old_favs = settings.get("favorites", {})
+    if isinstance(old_favs, dict) and old_favs:
+        migrated = False
+        for g, lst in list(old_favs.items()):
+            if lst:
+                # Only migrate if per-game file doesn't already exist
+                fp = get_favorites_file(g)
+                if not os.path.exists(fp):
+                    try:
+                        with open(fp, "w", encoding="utf-8") as f:
+                            json.dump(lst, f, indent=2, ensure_ascii=False)
+                        migrated = True
+                    except Exception:
+                        pass
+        if migrated:
+            # remove old entry and save settings
+            settings.pop("favorites", None)
+            save_settings()
+except Exception:
+    pass
+
 def semver_normalize(tag):
     """Strip leading 'v' and return normalized semver string."""
     if not tag:
@@ -275,7 +336,7 @@ def find_all_images_recursive(folder_path):
     image_paths = []
     for root, dirs, files in os.walk(folder_path):
         for f in files:
-            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+            if f.lower().endswith(('.wep', '.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                 image_paths.append(os.path.join(root, f))
     return image_paths
 
@@ -393,29 +454,29 @@ class ModManager(QWidget):
             tab = QWidget()
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            # Disable horizontal scrolling; only allow vertical
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             content = QWidget()
             grid = QGridLayout()
+            grid.setSpacing(5)
+            grid.setContentsMargins(5, 5, 5, 5)
             content.setLayout(grid)
+            # Set size policy so content expands horizontally but respects maximum width
+            from PyQt6.QtWidgets import QSizePolicy
+            content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             scroll.setWidget(content)
             layout = QVBoxLayout()
             
             # Add button for characters category
             if cat == "characters":
-                btn_add_char = QPushButton("➕ Add Character")
-                btn_add_char.setStyleSheet("""
-                    QPushButton {
-                        background-color: #0078d4;
-                        color: white;
-                        border-radius: 4px;
-                        padding: 8px;
-                        font-weight: bold;
-                    }
-                    QPushButton:hover {
-                        background-color: #1084e0;
-                    }
-                """)
-                btn_add_char.clicked.connect(self.add_new_character)
-                layout.addWidget(btn_add_char)
+                # Store as an attribute so theme updates can target it
+                self.btn_add_char = QPushButton("➕ Add Character")
+                self.btn_add_char.setObjectName("addCharBtn")
+                # Minimal default styling; will be overridden by theme application
+                self.btn_add_char.setStyleSheet("QPushButton { padding: 8px; border-radius:4px; font-weight:bold; }")
+                self.btn_add_char.clicked.connect(self.add_new_character)
+                layout.addWidget(self.btn_add_char)
             
             layout.addWidget(scroll)
             tab.setLayout(layout)
@@ -449,9 +510,13 @@ class ModManager(QWidget):
         self.preview_label = QLabel("No preview available")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setFixedHeight(250)  # adjust height as needed
-        self.preview_label.setStyleSheet(
-            "border: 1px solid gray; background-color: #111; color: #ccc;"
-        )
+        # Theme-aware preview background/text so light theme remains readable
+        theme_mode = settings.get("theme", "dark")
+        if theme_mode in ("dark", "game"):
+            prev_style = "border: 1px solid gray; background-color: #111; color: #ccc;"
+        else:
+            prev_style = "border: 1px solid #bbb; background-color: #f5f5f5; color: #222;"
+        self.preview_label.setStyleSheet(prev_style)
         self.preview_images = []   # list of image paths
         self.preview_index = 0
 
@@ -511,10 +576,23 @@ class ModManager(QWidget):
             self.settings_layout.addLayout(row)
             self.path_labels[game] = label
 
-        # Theme toggle
-        self.theme_btn = QPushButton("Toggle Theme")
-        self.theme_btn.clicked.connect(self.toggle_theme)
-        self.settings_layout.addWidget(self.theme_btn)
+        # Theme dropdown
+        theme_layout = QHBoxLayout()
+        theme_label = QLabel("Theme:")
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Dark", "Light", "Game Theme"])
+        current_theme = settings.get("theme", "dark")
+        if current_theme == "dark":
+            self.theme_combo.setCurrentIndex(0)
+        elif current_theme == "light":
+            self.theme_combo.setCurrentIndex(1)
+        else:  # game theme
+            self.theme_combo.setCurrentIndex(2)
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+        theme_layout.addWidget(theme_label)
+        theme_layout.addWidget(self.theme_combo)
+        theme_layout.addStretch()
+        self.settings_layout.addLayout(theme_layout)
 
         # Auto-check updates checkbox
         self.auto_check_box = QCheckBox("Auto check for updates on startup")
@@ -608,10 +686,11 @@ class ModManager(QWidget):
         self.fixes_info.setReadOnly(True)
         self.fixes_info.setPlaceholderText("No info available.")
         # Theme-aware styling to ensure readable text on dark/light themes
-        if settings.get("theme", "dark") == "dark":
+        theme_mode = settings.get("theme", "dark")
+        if theme_mode in ("dark", "game"):
             info_style = "background-color: #0f0f0f; color: #e0e0e0; border: 1px solid rgba(255,255,255,0.06); padding:6px; border-radius:6px;"
         else:
-            info_style = "background-color: #ffffff; color: #111; border: 1px solid rgba(0,0,0,0.08); padding:6px; border-radius:6px;"
+            info_style = "background-color: #f5f5f5; color: #222; border: 1px solid #bbb; padding:6px; border-radius:6px;"
         self.fixes_info.setStyleSheet(info_style)
 
         # Layout: left column (list + run button), right column (Info label + box)
@@ -642,7 +721,9 @@ class ModManager(QWidget):
         QTimer.singleShot(200, self.load_fixes_info)
 
     def select_fixes_target_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Target Folder")
+        # Start dialog in previously used script target for this game, then fallback to mod path or base dir
+        initial = settings.get("script_targets", {}).get(self.selected_game) or settings.get("mod_paths", {}).get(self.selected_game) or BASE_DIR
+        folder = QFileDialog.getExistingDirectory(self, "Select Target Folder", initial)
         if folder:
             settings.setdefault("script_targets", {})[self.selected_game] = folder
             save_settings()
@@ -827,6 +908,9 @@ class ModManager(QWidget):
         self.selected_game = self.game_combo.currentData()
         settings["last_selected_game"] = self.selected_game
         save_settings()
+        # Reapply theme if game theme is selected (to update accent colors)
+        if settings.get("theme", "dark") == "game":
+            self.apply_theme()
         self.load_items()
         try:
             self.update_fixes_tab()
@@ -893,8 +977,8 @@ class ModManager(QWidget):
             added = load_added_characters(self.selected_game)
             self.items.extend(added)
 
-        # Sort items: favorites first, then by name
-        favorites = settings.get("favorites", {}).get(self.selected_game, [])
+        # Sort items: favorites first, then by name (use per-game favorites file)
+        favorites = load_favorites(self.selected_game)
         self.items.sort(key=lambda x: (x["id"] not in favorites, x.get("name", "")))
 
         # Create main category folder if needed (ask user first)
@@ -930,6 +1014,8 @@ class ModManager(QWidget):
     def create_item_widget(self,item):
         frame = QFrame()
         frame.setAcceptDrops(True)  # Enable drop on character items
+        frame.setMaximumWidth(220)  # Fixed width to prevent expansion beyond grid column
+        frame.setMinimumWidth(200)
         layout = QVBoxLayout()
         frame.setLayout(layout)
         
@@ -938,7 +1024,8 @@ class ModManager(QWidget):
 
         # Modern styling for the frame (theme-aware)
         frame.setFrameShape(QFrame.Shape.Box)
-        if settings.get("theme", "dark") == "dark":
+        theme_mode = settings.get("theme", "dark")
+        if theme_mode == "dark":
             frame_style = """
                 QFrame {
                     border: 2px solid #444;
@@ -950,6 +1037,24 @@ class ModManager(QWidget):
                     border: 2px solid #0078d4;
                     background-color: #2a2a2a;
                 }
+            """
+        elif theme_mode == "game":
+            pal = self._get_game_colors(self.selected_game)
+            primary = pal['primary']
+            secondary = pal['secondary']
+            tertiary = pal['tertiary']
+            bg_light = pal['bg_light']
+            frame_style = f"""
+                QFrame {{
+                    border: 2px solid {tertiary};
+                    border-radius: 8px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bg_light}, stop:1 rgba(200,200,200,0.1));
+                    padding: 8px;
+                }}
+                QFrame:hover {{
+                    border: 2px solid {primary};
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {bg_light}, stop:1 rgba(210,210,210,0.15));
+                }}
             """
         else:
             frame_style = """
@@ -966,13 +1071,13 @@ class ModManager(QWidget):
             """
         frame.setStyleSheet(frame_style)
         
-        # Top row: Favorite button + warning
+        # Top row: Favorite button only (warning moves to top-right corner)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 5)
         fav_btn = QPushButton()
         fav_btn.setMaximumWidth(30)
         fav_btn.setMaximumHeight(30)
-        favorites = settings.get("favorites", {}).get(self.selected_game, [])
+        favorites = load_favorites(self.selected_game)
         is_fav = item["id"] in favorites
         fav_btn.setText("⭐" if is_fav else "☆")
         fav_btn.setStyleSheet("""QPushButton { 
@@ -987,44 +1092,65 @@ class ModManager(QWidget):
         """)
         fav_btn.clicked.connect(lambda: self.toggle_favorite(item))
 
-        # Warning label (placed next to favorite) - hidden by default
+        # Warning icon (top-right corner) - hidden by default
         warning_label = QLabel()
         warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Theme-aware color and transparent background to avoid dark/black patches
-        if settings.get("theme", "dark") == "dark":
+        # Theme-aware color and transparent background; render as a small colored circle with '!'
+        # Default colors; for 'game' theme we'll use the game accent
+        theme_mode = settings.get("theme", "dark")
+        if theme_mode == "dark":
             warn_color = "#ff6b6b"
+        elif theme_mode == "game":
+            tertiary = self._get_game_colors(self.selected_game)['tertiary']
+            primary = self._get_game_colors(self.selected_game)['secondary']
+            warn_color = tertiary
         else:
             warn_color = "#b00020"
-        warning_label.setStyleSheet(f"background-color: transparent; color: {warn_color}; font-weight: bold; font-size: 12px;")
-        warning_label.setMaximumHeight(0)
-        warning_label.setContentsMargins(4, 0, 6, 0)
+        warning_label.setText("!")
+        warning_label.setFixedSize(20, 20)  # Small corner icon
+        if theme_mode == "game":
+            # Use gradient background for warning icon in game theme
+            warning_label.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {warn_color}, stop:1 {primary}); color: white; font-weight: bold; font-size: 12px; border-radius: 10px;")
+        else:
+            warning_label.setStyleSheet(f"background-color: {warn_color}; color: white; font-weight: bold; font-size: 12px; border-radius: 10px;")
+        warning_label.setVisible(False)  # Hidden until needed
 
         top_row.addWidget(fav_btn)
-        top_row.addWidget(warning_label)
         top_row.addStretch()
+        top_row.addWidget(warning_label)
         layout.addLayout(top_row)
 
         # Icon
-        icon_path = os.path.join(
-            RESOURCES,
-            "icons",
-            f"{self.selected_game}_{self.selected_category}",
-            f"{item['id']}.png"
-        )
-        if os.path.exists(icon_path):
-            try:
-                pix = QPixmap(icon_path).scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
+        # Try multiple extensions for icon files (including .wep/.webp)
+        icon_label = None
+        try:
+            icon_dir = os.path.join(RESOURCES, "icons", f"{self.selected_game}_{self.selected_category}")
+            exts = ['.wep', '.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif']
+            found = None
+            for e in exts:
+                p = os.path.join(icon_dir, f"{item['id']}{e}")
+                if os.path.exists(p):
+                    found = p
+                    break
+            if found:
+                pix = QPixmap(found).scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
                 icon_label = QLabel()
                 icon_label.setPixmap(pix)
                 icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 layout.addWidget(icon_label)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         # Name label with modern styling
         name_label = QLabel(item['name'])
         name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setStyleSheet("color: #fff; font-weight: bold; font-size: 11px;")
+        # Theme-aware name color (treat 'game' as dark)
+        theme_mode = settings.get("theme", "dark")
+        if theme_mode in ("dark", "game"):
+            name_style = "color: #fff; font-weight: bold; font-size: 11px;"
+        else:
+            name_style = "color: #111; font-weight: bold; font-size: 11px;"
+        name_label.setStyleSheet(name_style)
         layout.addWidget(name_label)
 
         # Mod counter label
@@ -1049,16 +1175,16 @@ class ModManager(QWidget):
         if "characters" not in self.selected_category:
             QMessageBox.information(self, "Info", "Favorites are only available for characters.")
             return
-            
-        settings.setdefault("favorites", {})
-        settings["favorites"].setdefault(self.selected_game, [])
-        
-        if item["id"] in settings["favorites"][self.selected_game]:
-            settings["favorites"][self.selected_game].remove(item["id"])
+        # Use per-game favorites file
+        favs = load_favorites(self.selected_game) or []
+        if item["id"] in favs:
+            try:
+                favs.remove(item["id"])
+            except ValueError:
+                pass
         else:
-            settings["favorites"][self.selected_game].append(item["id"])
-        
-        save_settings()
+            favs.append(item["id"])
+        save_favorites(self.selected_game, favs)
         self.load_items()  # Refresh to reorder by favorites
 
 
@@ -1114,11 +1240,29 @@ class ModManager(QWidget):
         tab_data = self.tabs.get(self.selected_category)
         if not tab_data:
             cols = 3
+            content = None
+            scroll = None
         else:
             content = tab_data.get("content")
-            available_width = content.width() if content and content.width() > 0 else tab_data.get("scroll").width()
+            scroll = tab_data.get("scroll")
+            # Get the actual usable width from scroll viewport
+            avail_w = None
+            try:
+                if scroll and hasattr(scroll, 'viewport'):
+                    avail_w = scroll.viewport().width()
+            except Exception:
+                avail_w = None
+            if not avail_w and scroll:
+                avail_w = scroll.width()
+            if not avail_w:
+                avail_w = 660
+            
+            # Constrain content width to viewport to prevent horizontal scroll
+            if content and scroll:
+                content.setMaximumWidth(int(avail_w))
+            
             item_width = 220
-            cols = max(1, available_width // item_width)
+            cols = max(1, int(avail_w) // item_width)
 
         row = 0
         col = 0
@@ -1130,11 +1274,15 @@ class ModManager(QWidget):
                 col = 0
                 row += 1
 
-        # set stretch for responsiveness
-        for c in range(max(3, cols)):
+        # set stretch for responsiveness — all columns expand equally
+        for c in range(max(1, cols)):
             grid.setColumnStretch(c, 1)
+        # Add a final stretch column that expands to fill remaining space
+        grid.setColumnStretch(cols, 100)
         for r in range(row + 1):
             grid.setRowStretch(r, 0)
+
+        # (no forced minimum height here) allow the scroll area to size naturally
 
     def resizeEvent(self, event):
         # rearrange current grid after resize with debounce
@@ -1306,18 +1454,15 @@ class ModManager(QWidget):
         if '_counter_label' in item:
             item['_counter_label'].setText(f"Mods: {count}")
 
-        # Update warning only for characters - show/hide based on content
+        # Update warning icon visibility only for characters
         if '_warning_label' in item:
-            if self.selected_category == "characters":
-                if enabled_count > 1:
-                    item['_warning_label'].setText("⚠ More than 1 mod enabled!")
-                    item['_warning_label'].setMaximumHeight(20)  # Show
-                else:
-                    item['_warning_label'].setText("")
-                    item['_warning_label'].setMaximumHeight(0)  # Hide
+            if self.selected_category == "characters" and enabled_count > 1:
+                # Update tooltip with enabled mod count
+                item['_warning_label'].setVisible(True)
+                item['_warning_label'].setToolTip(f"{enabled_count} mods enabled")
+                # If we're in game theme, adjust color to accent in apply_theme; otherwise tooltip suffices
             else:
-                item['_warning_label'].setText("")
-                item['_warning_label'].setMaximumHeight(0)  # Hide
+                item['_warning_label'].setVisible(False)
 
     # -------------------- SELECT MOD --------------------
     def select_mod(self, list_item):
@@ -1447,15 +1592,44 @@ class ModManager(QWidget):
             open_folder(folder)
 
     # -------------------- THEME --------------------
-    def toggle_theme(self):
-        settings["theme"] = "dark" if settings.get("theme","dark")=="light" else "light"
+    def on_theme_changed(self, theme_name):
+        """Handle theme dropdown change."""
+        if theme_name == "Dark":
+            settings["theme"] = "dark"
+        elif theme_name == "Light":
+            settings["theme"] = "light"
+        else:  # Game Theme
+            settings["theme"] = "game"
         self.apply_theme()
         save_settings()
+        # Recreate items/widgets so per-item styles refresh correctly
+        try:
+            self.load_items()
+        except Exception:
+            pass
+
+    def clear_widget_styles(self):
+        """Clear inline styles on child widgets to allow stylesheet refresh."""
+        try:
+            for w in self.findChildren(QWidget):
+                try:
+                    w.setStyleSheet("")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def apply_theme(self):
-        if settings.get("theme","dark")=="dark":
-            # Modern dark theme inspired by IMM/JASM
-            self.setStyleSheet("""
+        # Clear per-widget inline styles first so global/theme styles apply consistently
+        try:
+            self.clear_widget_styles()
+        except Exception:
+            pass
+        # Apply global stylesheet for dark or light theme, then update inline widgets
+        theme_mode = settings.get("theme", "dark")
+        
+        if theme_mode == "dark":
+            dark_css = """
                 QWidget { 
                     background-color: #1a1a1a; 
                     color: #e0e0e0; 
@@ -1559,20 +1733,20 @@ class ModManager(QWidget):
                 QCheckBox::indicator:checked {
                     background-color: #0078d4;
                 }
-            """)
-        else:
-            # Modern light theme
-            self.setStyleSheet("""
+            """
+            self.setStyleSheet(dark_css)
+        elif theme_mode == "light":
+            light_css = """
                 QWidget { 
-                    background-color: #f5f5f5; 
+                    background-color: #e8e8e8; 
                     color: #222; 
                 }
                 QMainWindow { 
-                    background-color: #f5f5f5; 
+                    background-color: #e8e8e8; 
                 }
                 QTabWidget::pane { 
-                    background: #f5f5f5; 
-                    border: 1px solid #ddd; 
+                    background: #e8e8e8; 
+                    border: 1px solid #bbb; 
                 }
                 QTabBar::tab {
                     background-color: transparent;
@@ -1581,14 +1755,14 @@ class ModManager(QWidget):
                     padding: 6px 12px;
                     margin: 4px;
                     min-width: 90px;
-                    color: #555;
+                    color: #444;
                 }
                 QTabBar::tab:selected {
                     background-color: #0078d4;
                     color: white;
                 }
                 QTabBar::tab:hover {
-                    background-color: rgba(0,0,0,0.04);
+                    background-color: rgba(0,0,0,0.08);
                 }
                 QPushButton {
                     background-color: #0078d4;
@@ -1605,9 +1779,9 @@ class ModManager(QWidget):
                     background-color: #005a9e;
                 }
                 QLineEdit, QComboBox {
-                    background-color: white;
+                    background-color: #f5f5f5;
                     color: #222;
-                    border: 1px solid #ddd;
+                    border: 1px solid #bbb;
                     border-radius: 4px;
                     padding: 6px;
                 }
@@ -1615,9 +1789,9 @@ class ModManager(QWidget):
                     border: 2px solid #0078d4;
                 }
                 QListWidget {
-                    background-color: white;
+                    background-color: #f5f5f5;
                     color: #222;
-                    border: 1px solid #ddd;
+                    border: 1px solid #bbb;
                     border-radius: 4px;
                 }
                 QListWidget::item {
@@ -1630,14 +1804,14 @@ class ModManager(QWidget):
                     color: white;
                 }
                 QListWidget::item:hover {
-                    background-color: #e8e8e8;
+                    background-color: #ddd;
                 }
                 QScrollArea { 
-                    background-color: #f5f5f5; 
+                    background-color: #e8e8e8; 
                     border: none;
                 }
                 QScrollArea::viewport { 
-                    background-color: #f5f5f5; 
+                    background-color: #e8e8e8; 
                 }
                 QLabel { 
                     background-color: transparent; 
@@ -1646,7 +1820,272 @@ class ModManager(QWidget):
                 QCheckBox {
                     color: #222;
                 }
-            """)
+            """
+            self.setStyleSheet(light_css)
+        else:  # Game theme
+            # Apply game-specific coloring to tabs and widgets
+            self._apply_game_theme()
+
+        # Clear widget-level overrides when not using game theme so global stylesheet applies cleanly
+        if theme_mode != "game":
+            widget_names = ['btn_add_char','gamebanana_btn','open_folder_btn','toggle_mod_btn','check_updates_btn','update_modmanager_btn','update_installer_btn','prev_img_btn','next_img_btn','mod_list_widget','settings_tab','fixes_tab']
+            for name in widget_names:
+                try:
+                    if hasattr(self, name):
+                        getattr(self, name).setStyleSheet("")
+                except Exception:
+                    pass
+
+        # Update any widgets with inline theme-sensitive styles
+        try:
+            if hasattr(self, 'preview_label'):
+                if theme_mode == "dark":
+                    self.preview_label.setStyleSheet("border: 1px solid gray; background-color: #111; color: #ccc;")
+                elif theme_mode == "light":
+                    self.preview_label.setStyleSheet("border: 1px solid #bbb; background-color: #f5f5f5; color: #222;")
+                else:  # game theme
+                    # Use tertiary color border and light background for preview in game theme
+                    pal_colors = self._get_game_colors(self.selected_game)
+                    tertiary = pal_colors['tertiary']
+                    bg_light = pal_colors['bg_light']
+                    self.preview_label.setStyleSheet(f"border: 2px solid {tertiary}; background-color: {bg_light}; color: #222;")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'fixes_info'):
+                if theme_mode == "dark":
+                    info_style = "background-color: #0f0f0f; color: #e0e0e0; border: 1px solid rgba(255,255,255,0.06); padding:6px; border-radius:6px;"
+                elif theme_mode == "light":
+                    info_style = "background-color: #f5f5f5; color: #222; border: 1px solid #bbb; padding:6px; border-radius:6px;"
+                else:  # game theme
+                    info_style = "background-color: #0f0f0f; color: #e0e0e0; border: 1px solid rgba(255,255,255,0.06); padding:6px; border-radius:6px;"
+                self.fixes_info.setStyleSheet(info_style)
+        except Exception:
+            pass
+
+        # Additional adjustments for game theme widgets
+        if theme_mode == "game":
+            pal = self._get_game_colors(self.selected_game)
+            primary = pal['primary']
+            secondary = pal['secondary']
+            tertiary = pal['tertiary']
+            bg_light = pal['bg_light']
+            bg_dark = pal['bg_dark']
+            text = pal['text_light']
+            
+            # Add Character button with metallic gradient
+            try:
+                if hasattr(self, 'btn_add_char'):
+                    self.btn_add_char.setStyleSheet(f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary}); color: white; border: 1px solid {tertiary}; border-radius:4px; padding:8px; font-weight:bold; }} QPushButton:hover {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {secondary}, stop:1 {primary}); }}")
+            except Exception:
+                pass
+
+            # Common header/action buttons with metallic gradient
+            btn_names = ['gamebanana_btn','open_folder_btn','toggle_mod_btn','check_updates_btn','update_modmanager_btn','update_installer_btn','prev_img_btn','next_img_btn']
+            try:
+                for name in btn_names:
+                    if hasattr(self, name):
+                        w = getattr(self, name)
+                        try:
+                            w.setStyleSheet(f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary}); color: white; border: 1px solid {tertiary}; border-radius:4px; padding:6px; font-weight:bold; }} QPushButton:hover {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {secondary}, stop:1 {primary}); }}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Mod list and preview area with game theme colors
+            try:
+                if hasattr(self, 'mod_list_widget'):
+                    self.mod_list_widget.setStyleSheet(f"QListWidget {{ background-color: {bg_light}; color: #222; border: 1px solid {tertiary}; }} QListWidget::item:selected {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary}); color: #fff; }}")
+                if hasattr(self, 'preview_label'):
+                    self.preview_label.setStyleSheet(f"border: 2px solid {primary}; background-color: {bg_light}; color: #222;")
+            except Exception:
+                pass
+
+            # Settings and fixes tabs with matching backgrounds
+            try:
+                if hasattr(self, 'settings_tab'):
+                    self.settings_tab.setStyleSheet(f"background-color: {bg_light}; color: #222;")
+                if hasattr(self, 'fixes_tab'):
+                    self.fixes_tab.setStyleSheet(f"background-color: {bg_light}; color: #222;")
+                # Update path labels to use dark text on light backgrounds
+                if hasattr(self, 'path_labels'):
+                    for k, lbl in self.path_labels.items():
+                        try:
+                            lbl.setStyleSheet(f"color: #222;")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Update any visible warning icons with game accent
+            try:
+                for it in getattr(self, 'items', []):
+                    lbl = it.get('_warning_label')
+                    if lbl:
+                        lbl.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {primary}, stop:1 {secondary}); color: white; font-weight: bold; font-size: 12px; border-radius: 10px;")
+            except Exception:
+                pass
+
+    def _get_game_colors(self, game_key=None):
+        """Return a rich color palette for the specified game with metallic colors.
+        
+        Keys: primary (metallic main), secondary (metallic hover), tertiary (accent/border),
+              bg_light (light background), bg_dark (dark panels), text_light, text_dark
+        """
+        palettes = {
+            "gi": {  # Genshin Impact - Luxurious gold/bronze with warm tones
+                "primary": "#d4af37",      # Bright metallic gold
+                "secondary": "#cd7f32",   # Warm bronze
+                "tertiary": "#ff8c42",    # Orange accent
+                "bg_light": "#e8e3de",    # Warm cream/grey
+                "bg_dark": "#2a251f",     # Dark warm brown
+                "text_light": "#f5f5f5",
+                "text_dark": "#1a1a1a",
+            },
+            "hsr": {  # Honkai Star Rail - Cosmic silver/platinum
+                "primary": "#c0c0c0",     # Metallic silver
+                "secondary": "#a0a0a0",  # Platinum
+                "tertiary": "#8b5cf6",    # Deep purple
+                "bg_light": "#e0e0e0",    # Light silver-grey
+                "bg_dark": "#1a0f2e",     # Deep space purple
+                "text_light": "#f5f5f5",
+                "text_dark": "#1a1a1a",
+            },
+            "wuwa": {  # Wuthering Waves - Sleek cyan/platinum
+                "primary": "#00d9ff",     # Bright cyan metallic
+                "secondary": "#00bfdb",  # Teal metallic
+                "tertiary": "#b0e0e6",    # Powder blue
+                "bg_light": "#d4f1f9",    # Light cyan
+                "bg_dark": "#0a1f2e",     # Deep teal
+                "text_light": "#f5f5f5",
+                "text_dark": "#1a1a1a",
+            },
+            "zzz": {  # Zenless Zone Zero - Bold red/chrome
+                "primary": "#ff3333",     # Bright metallic red
+                "secondary": "#cc0000",  # Deep red
+                "tertiary": "#ffaa00",   # Gold accent
+                "bg_light": "#f5e6e6",    # Light red-grey
+                "bg_dark": "#1a0a0a",     # Deep black-red
+                "text_light": "#f5f5f5",
+                "text_dark": "#1a1a1a",
+            },
+            "end": {  # Endfield - Nature gold/bronze with forest
+                "primary": "#d4af37",     # Metallic gold
+                "secondary": "#b8860b",  # Dark goldenrod
+                "tertiary": "#228b22",   # Forest green
+                "bg_light": "#e8dcc4",    # Light tan
+                "bg_dark": "#1a2e1a",     # Forest dark
+                "text_light": "#f5f5f5",
+                "text_dark": "#1a1a1a",
+            },
+        }
+        k = game_key or self.selected_game or "gi"
+        return palettes.get(k, palettes["gi"])
+
+    def _apply_game_theme(self):
+        """Apply a richer game-specific theme using multiple palette colors with metallic effects."""
+        pal = self._get_game_colors(self.selected_game)
+        primary = pal["primary"]
+        secondary = pal["secondary"]
+        tertiary = pal["tertiary"]
+        bg_light = pal["bg_light"]
+        bg_dark = pal["bg_dark"]
+        text = pal["text_light"]
+
+        # Metallic gradient and shadow effects for depth
+        game_css = f"""
+            QWidget {{ 
+                background-color: {bg_dark};
+                color: {text};
+            }}
+            QMainWindow {{ 
+                background-color: {bg_dark};
+            }}
+            QTabWidget::pane {{ 
+                background: {bg_dark}; 
+                border: 1px solid {secondary}; 
+            }}
+            QTabBar::tab {{
+                background-color: transparent;
+                border: 1px solid rgba(255,255,255,0.05);
+                border-radius: 8px;
+                padding: 6px 12px;
+                margin: 4px;
+                min-width: 90px;
+                color: {text};
+            }}
+            QTabBar::tab:selected {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary});
+                border: 1px solid {secondary};
+                color: white;
+                font-weight: bold;
+            }}
+            QTabBar::tab:hover {{
+                background-color: rgba(255,255,255,0.08);
+            }}
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary});
+                color: white;
+                border: 1px solid {tertiary};
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {secondary}, stop:1 {primary});
+            }}
+            QPushButton:pressed {{
+                border: 1px inset {tertiary};
+            }}
+            QLineEdit, QComboBox {{
+                background-color: {bg_light};
+                color: #222;
+                border: 1px solid {tertiary};
+                border-radius: 4px;
+                padding: 6px;
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border: 2px solid {primary};
+            }}
+            QListWidget {{
+                background-color: {bg_light};
+                color: #222;
+                border: 1px solid {tertiary};
+                border-radius: 4px;
+            }}
+            QListWidget::item {{
+                padding: 6px;
+                margin: 2px;
+                border-radius: 3px;
+            }}
+            QListWidget::item:selected {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary});
+                color: white;
+            }}
+            QListWidget::item:hover {{
+                background-color: {tertiary};
+            }}
+            QScrollArea {{ 
+                background-color: {bg_dark}; 
+                border: none;
+            }}
+            QScrollArea::viewport {{ 
+                background-color: {bg_dark}; 
+            }}
+            QLabel {{ 
+                background-color: transparent; 
+                color: {text};
+            }}
+            QCheckBox {{
+                color: {text};
+            }}
+            QCheckBox::indicator:checked {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary}, stop:1 {secondary});
+            }}
+        """
+        self.setStyleSheet(game_css)
+
 
     def on_search_text_changed(self, text):
         """Debounced search text handler."""
@@ -1768,19 +2207,25 @@ class ModManager(QWidget):
             if not download_url:
                 return
             
-            # Download to temp location
+            # Download to temp location (always attempt; overwrite if exists)
             temp_path = os.path.join(BASE_DIR, "update_new.exe")
-            if not os.path.exists(temp_path):
-                ok = download_url_to_path(download_url, temp_path)
-                if ok and os.path.exists(temp_path):
-                    # Replace old installer
-                    try:
-                        if os.path.exists(local_update):
+            ok = download_url_to_path(download_url, temp_path)
+            if ok and os.path.exists(temp_path):
+                # Replace old installer
+                try:
+                    if os.path.exists(local_update):
+                        try:
                             os.remove(local_update)
+                        except Exception:
+                            pass
+                    # rename (overwrite)
+                    try:
+                        os.replace(temp_path, local_update)
+                    except Exception:
                         os.rename(temp_path, local_update)
-                        print("Installer auto-updated successfully")
-                    except Exception as e:
-                        print(f"Failed to auto-update installer: {e}")
+                    print("Installer auto-updated successfully")
+                except Exception as e:
+                    print(f"Failed to auto-update installer: {e}")
         except Exception as e:
             print(f"Auto-update installer error: {e}")
 
