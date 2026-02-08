@@ -72,7 +72,7 @@ If something is unclear or if  I forgot anything please let me know.
 ------------------------------------------------
 
 If you have questions, have any suggestions or want me to remove something you created (fixes) dm me on discord on one of my two accounts. 
-Also feel free modify the mod manager in any way you like. ------------------------------------
+Also feel free modify the mod manager in any way you like. --------------------------------
 <img width="421" height="353" alt="image" src="https://github.com/user-attachments/assets/619fe544-8b59-4249-ab43-6ace56fd1b24" />
 <img width="415" height="334" alt="image" src="https://github.com/user-attachments/assets/5edde990-b988-4cce-849e-387951a6f305" />
 
