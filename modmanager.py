@@ -1,4 +1,4 @@
-# Version 1.2.2
+# Version 1.2.3
 # modmanager.py - Mod Manager GUI with update checks and settings
 # NOTE: Designed to be run with Python 3.10+ and PyQt6 installed.
 # Uses only stdlib network (urllib) to avoid extra pip deps for update check.
@@ -21,13 +21,13 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit, QTextEdit,
     QInputDialog, QSizePolicy
 )
-from PyQt6.QtGui import QPixmap, QFont
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QPixmap, QFont, QImageReader
+from PyQt6.QtCore import Qt, QTimer, QMetaObject
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # -------------------- Version & BASE DIRECTORY --------------------
-SCRIPT_VERSION = "1.2.2"  # keep in sync with settings default "version"
+DEFAULT_VERSION = "1.2.3"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -37,6 +37,37 @@ else:
 RESOURCES = os.path.join(BASE_DIR, "resources")
 os.makedirs(RESOURCES, exist_ok=True)
 SETTINGS_FILE = os.path.join(RESOURCES, "settings.json")
+
+def _parse_version_string(value):
+    if not value:
+        return None
+    parts = value.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return value
+
+def get_version_from_resources(resources_dir, fallback):
+    """Return latest version based on '*.txt' filenames in resources."""
+    try:
+        candidates = []
+        for name in os.listdir(resources_dir):
+            if not name.lower().endswith(".txt"):
+                continue
+            version_str = _parse_version_string(name[:-4])
+            if version_str:
+                candidates.append(version_str)
+        if not candidates:
+            return fallback
+        try:
+            return max(candidates, key=pkg_version.parse)
+        except Exception:
+            def as_tuple(v):
+                return tuple(int(p) for p in v.split("."))
+            return max(candidates, key=as_tuple)
+    except Exception:
+        return fallback
+
+SCRIPT_VERSION = get_version_from_resources(RESOURCES, DEFAULT_VERSION)
 
 # -------------------- CONFIG --------------------
 GAMES = {"gi": "Genshin Impact", "hsr": "Honkai Star Rail", "wuwa": "Wuthering Waves", "zzz": "Zenless Zone Zero", "end": "Endfield"}
@@ -270,7 +301,9 @@ def semver_normalize(tag):
     if not tag:
         return None
     t = tag.strip()
-    if t.startswith("v") or t.startswith("V"):
+    if t.startswith("v.") or t.startswith("V."):
+        t = t[2:]
+    elif t.startswith("v") or t.startswith("V"):
         t = t[1:]
     return t
 
@@ -336,7 +369,7 @@ def find_all_images_recursive(folder_path):
     image_paths = []
     for root, dirs, files in os.walk(folder_path):
         for f in files:
-            if f.lower().endswith(('.wep', '.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+            if f.lower().endswith(('.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                 image_paths.append(os.path.join(root, f))
     return image_paths
 
@@ -374,6 +407,10 @@ class ModManager(QWidget):
         self.search_results_data = {}  # Store search results for navigation
         self.search_debounce_timer = None  # Debounce timer for search
         self.resize_debounce_timer = None  # Debounce timer for resize
+        self.mod_refresh_timer = QTimer()
+        self.mod_refresh_timer.setSingleShot(True)
+        self.mod_refresh_timer.timeout.connect(self.load_mods)
+        self._loading_mods = False
 
         self.observer = Observer()
         self.observer.start()
@@ -383,6 +420,24 @@ class ModManager(QWidget):
         self.load_items()
         QTimer.singleShot(500, self.start_update_check)
         QTimer.singleShot(1000, self.auto_update_installer)
+
+    def _start_mod_refresh_timer(self):
+        try:
+            if self.mod_refresh_timer.isActive():
+                self.mod_refresh_timer.stop()
+            self.mod_refresh_timer.start(150)
+        except Exception:
+            pass
+
+    def request_mods_refresh(self):
+        """Thread-safe request to refresh mods list after filesystem changes."""
+        try:
+            QMetaObject.invokeMethod(self, "_start_mod_refresh_timer", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            try:
+                QTimer.singleShot(0, self._start_mod_refresh_timer)
+            except Exception:
+                pass
 
     # -------------------- UI --------------------
     def init_ui(self):
@@ -1125,7 +1180,7 @@ class ModManager(QWidget):
         icon_label = None
         try:
             icon_dir = os.path.join(RESOURCES, "icons", f"{self.selected_game}_{self.selected_category}")
-            exts = ['.wep', '.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif']
+            exts = ['.webp', '.png', '.jpg', '.jpeg', '.bmp', '.gif']
             found = None
             for e in exts:
                 p = os.path.join(icon_dir, f"{item['id']}{e}")
@@ -1370,67 +1425,73 @@ class ModManager(QWidget):
         self.selected_mod_path = None
 
     def load_mods(self):
-        self.clear_mod_list()
-        if not self.selected_item:
+        if self._loading_mods:
             return
-
-        char_folder = os.path.join(
-            settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
-            self.selected_category,
-            self.selected_item["id"]
-        )
-        
-        # Ask to create folder if it doesn't exist
-        if not os.path.exists(char_folder):
-            reply = QMessageBox.question(
-                self,
-                "Create Folder?",
-                f"The folder for '{self.selected_item['name']}' doesn't exist.\n\nCreate it now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                try:
-                    os.makedirs(char_folder, exist_ok=True)
-                except Exception as e:
-                    print(f"Failed to create folder: {e}")
-                    return
-            else:
+        self._loading_mods = True
+        try:
+            self.clear_mod_list()
+            if not self.selected_item:
                 return
 
-        # Watch folder: unschedule & schedule
-        try:
-            self.observer.unschedule_all()
-            self.observer.schedule(ModFolderHandler(self.load_mods), char_folder, recursive=True)
-        except Exception:
-            # observer might not be running on some platforms but ignore for now
-            pass
+            char_folder = os.path.join(
+                settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
+                self.selected_category,
+                self.selected_item["id"]
+            )
+            
+            # Ask to create folder if it doesn't exist
+            if not os.path.exists(char_folder):
+                reply = QMessageBox.question(
+                    self,
+                    "Create Folder?",
+                    f"The folder for '{self.selected_item['name']}' doesn't exist.\n\nCreate it now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    try:
+                        os.makedirs(char_folder, exist_ok=True)
+                    except Exception as e:
+                        print(f"Failed to create folder: {e}")
+                        return
+                else:
+                    return
 
-        mods = []
-        try:
-            for f in os.listdir(char_folder):
-                full_path = os.path.join(char_folder, f)
-                if os.path.isdir(full_path):
-                    disabled = f.startswith("DISABLED_")
-                    display_name = f.replace("DISABLED_", "")
-                    mods.append({"name": f, "display": display_name, "disabled": disabled, "path": full_path})
-        except FileNotFoundError:
-            pass
+            # Watch folder: unschedule & schedule
+            try:
+                self.observer.unschedule_all()
+                self.observer.schedule(ModFolderHandler(self.request_mods_refresh), char_folder, recursive=True)
+            except Exception:
+                # observer might not be running on some platforms but ignore for now
+                pass
 
-        for m in mods:
-            item_text = m["display"]
-            font = QFont()
-            if m["disabled"]:
-                item_text = f"[DISABLED] {item_text}"
-                font.setItalic(True)
-            else:
-                font.setBold(True)
-            list_item = QListWidgetItem(item_text)
-            list_item.setData(Qt.ItemDataRole.UserRole, m["path"])
-            list_item.setFont(font)
-            self.mod_list_widget.addItem(list_item)
+            mods = []
+            try:
+                for f in os.listdir(char_folder):
+                    full_path = os.path.join(char_folder, f)
+                    if os.path.isdir(full_path):
+                        disabled = f.startswith("DISABLED_")
+                        display_name = f.replace("DISABLED_", "")
+                        mods.append({"name": f, "display": display_name, "disabled": disabled, "path": full_path})
+            except FileNotFoundError:
+                pass
 
-        self.update_mod_counters()
+            for m in mods:
+                item_text = m["display"]
+                font = QFont()
+                if m["disabled"]:
+                    item_text = f"[DISABLED] {item_text}"
+                    font.setItalic(True)
+                else:
+                    font.setBold(True)
+                list_item = QListWidgetItem(item_text)
+                list_item.setData(Qt.ItemDataRole.UserRole, m["path"])
+                list_item.setFont(font)
+                self.mod_list_widget.addItem(list_item)
+
+            self.update_mod_counters()
+        finally:
+            self._loading_mods = False
 
     # -------------------- MOD COUNTERS --------------------
     def update_mod_counters(self):
@@ -1497,7 +1558,16 @@ class ModManager(QWidget):
     def show_mod_preview(self, mod_folder_path):
         """Display images from mod folder (including subfolders) with navigation."""
         try:
-            self.preview_images = find_all_images_recursive(mod_folder_path)
+            all_images = find_all_images_recursive(mod_folder_path)
+            valid_images = []
+            for img in all_images:
+                try:
+                    reader = QImageReader(img)
+                    if reader.canRead():
+                        valid_images.append(img)
+                except Exception:
+                    pass
+            self.preview_images = valid_images
             self.preview_index = 0
 
             if not self.preview_images:
@@ -1521,14 +1591,37 @@ class ModManager(QWidget):
     def _display_current_preview(self):
         if not self.preview_images:
             return
-        img_path = self.preview_images[self.preview_index]
-        pix = QPixmap(img_path).scaled(
-            self.preview_label.width(),
-            self.preview_label.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.preview_label.setPixmap(pix)
+        attempts = 0
+        while self.preview_images and attempts < len(self.preview_images):
+            img_path = self.preview_images[self.preview_index]
+            try:
+                reader = QImageReader(img_path)
+                if reader.canRead():
+                    img = reader.read()
+                    if not img.isNull():
+                        pix = QPixmap.fromImage(img).scaled(
+                            self.preview_label.width(),
+                            self.preview_label.height(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        self.preview_label.setPixmap(pix)
+                        self.prev_img_btn.setEnabled(len(self.preview_images) > 1)
+                        self.next_img_btn.setEnabled(len(self.preview_images) > 1)
+                        return
+            except Exception:
+                pass
+
+            # Drop unreadable image and try the next one.
+            self.preview_images.pop(self.preview_index)
+            if self.preview_images:
+                self.preview_index = self.preview_index % len(self.preview_images)
+            attempts += 1
+
+        self.preview_label.setText("No preview available")
+        self.preview_label.setPixmap(QPixmap())
+        self.prev_img_btn.setEnabled(False)
+        self.next_img_btn.setEnabled(False)
     
     def show_prev_image(self):
         if not self.preview_images:
