@@ -1,8 +1,0 @@
-[
-  {"id": "sword", "name": "sword"},
-  {"id": "bow", "name": "bow"},
-  {"id": "catalyst", "name": "catalyst"},
-  {"id": "polearm", "name": "polearm"},
-  {"id": "claymore", "name": "claymore"},
-  {"id": "other", "name": "other"}
-]
