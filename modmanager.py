@@ -9,8 +9,13 @@ import json
 import shutil
 import subprocess
 import threading
+import queue
+import configparser
+import re
+import html
 import urllib.request
 import urllib.error
+from urllib.parse import urlparse, urlencode, quote
 import zipfile
 import tempfile
 import webbrowser
@@ -19,10 +24,10 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QComboBox, QTabWidget, QGridLayout, QScrollArea, QFrame, QFileDialog,
     QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QLineEdit, QTextEdit,
-    QInputDialog, QSizePolicy
+    QInputDialog, QSizePolicy, QStackedWidget, QProgressBar
 )
 from PyQt6.QtGui import QPixmap, QFont, QImageReader
-from PyQt6.QtCore import Qt, QTimer, QMetaObject
+from PyQt6.QtCore import Qt, QTimer, QMetaObject, QEvent
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -84,7 +89,67 @@ RABBITFX_URLS = {
     "zzz": "https://gamebanana.com/mods/531649",
     "end": "https://gamebanana.com/mods/651557",
 }
-CATEGORIES = ["characters", "weapons", "ui", "objects", "npcs"]
+BROWSE_GAME_DATA = {
+    "gi": {
+        "game_id": "8552",
+        "types": [
+            {"name": "Characters", "id": 18140},
+            {"name": "Weapons", "id": 18137},
+            {"name": "Other", "id": 12526},
+            {"name": "UI", "id": 22474},
+            {"name": "Objects", "id": 18310},
+            {"name": "Entity", "id": 22725},
+            {"name": "Gadget", "id": 23574},
+            {"name": "Waverider", "id": 24279},
+        ],
+    },
+    "hsr": {
+        "game_id": "18366",
+        "types": [
+            {"name": "Characters", "id": 22832},
+            {"name": "Weapons", "id": 22833},
+            {"name": "UI", "id": 22830},
+            {"name": "Other", "id": 22628},
+            {"name": "Objects", "id": 22829},
+            {"name": "Entity", "id": 23974},
+        ],
+    },
+    "wuwa": {
+        "game_id": "20357",
+        "types": [
+            {"name": "Skins", "id": 29524},
+            {"name": "UI", "id": 29496},
+            {"name": "Other", "id": 29493},
+        ],
+    },
+    "zzz": {
+        "game_id": "19567",
+        "types": [
+            {"name": "Characters", "id": 30305},
+            {"name": "Bangboo", "id": 30702},
+            {"name": "Other", "id": 29874},
+            {"name": "UI", "id": 30395},
+        ],
+    },
+    "end": {
+        "game_id": "21842",
+        "types": [
+            {"name": "Operators", "id": 42770},
+            {"name": "Weapons", "id": 42772},
+            {"name": "UI", "id": 42706},
+            {"name": "Other", "id": 42780},
+        ],
+    },
+}
+
+BROWSE_SORTS = [
+    ("Default", "default"),
+    ("Newest", "new"),
+    ("Updated", "updated"),
+    ("Popular", "popular"),
+]
+
+CATEGORIES = ["characters", "weapons", "ui", "objects", "npcs", "buffervalues"]
 
 GITHUB_RELEASES_API = "https://api.github.com/repos/Sanddino00/Mod-Manager/releases/latest"
 # expected filenames in release:
@@ -167,6 +232,9 @@ class ModListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DropOnly)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.mod_manager = None  # Will be set by ModManager
     
     def dragEnterEvent(self, event):
@@ -175,6 +243,14 @@ class ModListWidget(QListWidget):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        """Keep accepting external file drags while moving over the list."""
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            super().dragMoveEvent(event)
     
     def dropEvent(self, event):
         """Handle dropping folders/files from file explorer."""
@@ -182,9 +258,8 @@ class ModListWidget(QListWidget):
             if event.mimeData().hasUrls():
                 for url in event.mimeData().urls():
                     path = url.toLocalFile()
-                    if os.path.isdir(path) and self.mod_manager:
-                        # Copy the dropped folder to current character's mod folder
-                        self.mod_manager.import_mod_from_path(path)
+                    if path and self.mod_manager:
+                        self.mod_manager.import_mod_source(path)
                 event.acceptProposedAction()
             else:
                 super().dropEvent(event)
@@ -237,6 +312,23 @@ def save_added_characters(game, characters):
             json.dump(characters, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"Failed to save added characters for {game}: {e}")
+
+
+def get_category_folder_name(category):
+    """Map UI category keys to on-disk folder names."""
+    if (category or "").lower() == "buffervalues":
+        return "BufferValues"
+    return category
+
+
+def build_item_folder_path(base_path, category, item_id=None):
+    """Build item folder path with support for category-root pseudo items."""
+    cat_folder = os.path.join(base_path, get_category_folder_name(category))
+    if (category or "").lower() == "buffervalues" and (item_id is None or item_id == "__root__"):
+        return cat_folder
+    if item_id is None:
+        return cat_folder
+    return os.path.join(cat_folder, item_id)
 
 
 def get_favorites_file(game):
@@ -364,6 +456,18 @@ def download_url_to_path(url, dest_path, progress_callback=None):
         print(f"Download failed ({url} -> {dest_path}):", e)
         return False
 
+
+def guess_image_extension_from_url(url, default_ext=".jpg"):
+    """Guess image extension from URL path. Falls back to default when unknown."""
+    try:
+        path = urlparse(url).path
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
+            return ext
+    except Exception:
+        pass
+    return default_ext
+
 def find_all_images_recursive(folder_path):
     """Return a list of all image file paths inside folder and subfolders."""
     image_paths = []
@@ -386,6 +490,7 @@ class ModManager(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mod Manager")
+        self.setAcceptDrops(True)
         # Load window size from settings
         width = settings.get("window_width", 1200)
         height = settings.get("window_height", 800)
@@ -404,18 +509,51 @@ class ModManager(QWidget):
         self.selected_item = None
         self.items = []
         self.selected_mod_path = None
+        self.selected_ini_path = None
+        self.ini_entries = []
         self.search_results_data = {}  # Store search results for navigation
         self.search_debounce_timer = None  # Debounce timer for search
         self.resize_debounce_timer = None  # Debounce timer for resize
+        self.update_prompt_shown_for_tag = None
+        self.update_prompt_open = False
+        self.browse_categories = []
+        self.browse_results_data = []
+        self.browse_selected_mod = None
+        self.browse_selected_file = None
+        self.browse_selected_index = -1
+        self.browse_selected_type = None
+        self.browse_route = ("home", None)
+        self.browse_current_page = 1
+        self.browse_has_more = False
+        self.browse_loading = False
+        self.browse_preview_cache = {}
+        self.browse_card_frames = []
+        self.browse_card_img_labels = []
+        self.browse_message_queue = queue.Queue()
+        self.browse_request_token = 0
+        self.browse_categories_token = 0
+        self.browse_mods_token = 0
+        self.browse_detail_token = 0
+        self.browse_download_queue = []
+        self.browse_download_current = None
+        self.browse_download_history = []
+        self.browse_download_counter = 0
         self.mod_refresh_timer = QTimer()
         self.mod_refresh_timer.setSingleShot(True)
         self.mod_refresh_timer.timeout.connect(self.load_mods)
+        self.browse_poll_timer = QTimer()
+        self.browse_poll_timer.setInterval(50)
+        self.browse_poll_timer.timeout.connect(self._process_browse_queue)
+        self.browse_poll_timer.start()
         self._loading_mods = False
 
         self.observer = Observer()
         self.observer.start()
 
+        self.ensure_buffer_values_folders()
+
         self.init_ui()
+        self._register_drop_targets()
         # load items and start background update check
         self.load_items()
         QTimer.singleShot(500, self.start_update_check)
@@ -428,6 +566,59 @@ class ModManager(QWidget):
             self.mod_refresh_timer.start(150)
         except Exception:
             pass
+
+    def _register_drop_targets(self):
+        """Register widgets that should accept external drag/drop imports."""
+        targets = [
+            self,
+            getattr(self, "content_stack", None),
+            getattr(self, "detail_page", None),
+            getattr(self, "mod_list_widget", None),
+            getattr(self.mod_list_widget, "viewport", lambda: None)(),
+            getattr(self, "preview_label", None),
+        ]
+        for widget in targets:
+            if widget is None:
+                continue
+            try:
+                widget.setAcceptDrops(True)
+                widget.installEventFilter(self)
+            except Exception:
+                pass
+
+    def eventFilter(self, watched, event):
+        """Catch drag/drop on child widgets so Explorer drops work anywhere useful."""
+        try:
+            event_type = event.type()
+            if event_type == QEvent.Type.DragEnter:
+                if self._dropped_local_paths(event.mimeData()):
+                    event.setDropAction(Qt.DropAction.CopyAction)
+                    event.accept()
+                    return True
+            elif event_type == QEvent.Type.DragMove:
+                if self._dropped_local_paths(event.mimeData()):
+                    event.setDropAction(Qt.DropAction.CopyAction)
+                    event.accept()
+                    return True
+            elif event_type == QEvent.Type.Drop:
+                if self._dropped_local_paths(event.mimeData()):
+                    self.dropEvent(event)
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(watched, event)
+
+    def ensure_buffer_values_folders(self):
+        """Ensure BufferValues exists for every game's configured mod root."""
+        try:
+            mod_paths = settings.get("mod_paths", {})
+            for game in GAMES.keys():
+                base = mod_paths.get(game, default_mod_paths.get(game))
+                if not base:
+                    continue
+                os.makedirs(os.path.join(base, "BufferValues"), exist_ok=True)
+        except Exception as e:
+            print(f"Failed to ensure BufferValues folders: {e}")
 
     def request_mods_refresh(self):
         """Thread-safe request to refresh mods list after filesystem changes."""
@@ -462,6 +653,13 @@ class ModManager(QWidget):
         top_layout.addWidget(QLabel("Select Game:"))
         top_layout.addWidget(self.gamebanana_btn)
         top_layout.addWidget(self.game_combo)
+
+        self.mode_modmanager_btn = QPushButton("Mod Manager")
+        self.mode_modmanager_btn.clicked.connect(self.switch_to_modmanager_mode)
+        top_layout.addWidget(self.mode_modmanager_btn)
+        self.mode_browse_btn = QPushButton("Browse")
+        self.mode_browse_btn.clicked.connect(self.switch_to_browse_mode)
+        top_layout.addWidget(self.mode_browse_btn)
         
         # Search bar
         top_layout.addWidget(QLabel("  Search:"))
@@ -498,10 +696,16 @@ class ModManager(QWidget):
         # Add search results list below top bar
         main_layout.addWidget(self.search_results_list)
 
-        # Center layout
-        center_layout = QHBoxLayout()
+        # Main content stack
+        self.content_stack = QStackedWidget()
 
-        # Left: Tabs for categories + settings
+        # Overview page: category tabs
+        self.overview_page = QWidget()
+        overview_layout = QVBoxLayout()
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        self.overview_page.setLayout(overview_layout)
+
+        # Tabs for categories + settings
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.West)
         self.tabs = {}
@@ -535,7 +739,8 @@ class ModManager(QWidget):
             
             layout.addWidget(scroll)
             tab.setLayout(layout)
-            self.tab_widget.addTab(tab, cat.capitalize())
+            tab_label = "BufferValues" if cat == "buffervalues" else cat.capitalize()
+            self.tab_widget.addTab(tab, tab_label)
             self.tabs[cat] = {"tab": tab, "grid": grid, "scroll": scroll, "content": content}
 
         # Fixes tab (scripts runner)
@@ -553,14 +758,61 @@ class ModManager(QWidget):
         self.create_settings_tab()
 
         self.tab_widget.currentChanged.connect(self.tab_changed)
-        center_layout.addWidget(self.tab_widget,2)
+        overview_layout.addWidget(self.tab_widget)
+        self.content_stack.addWidget(self.overview_page)
 
-        # Right: Mods and Preview
-        right_layout = QVBoxLayout()
-        self.open_folder_btn = QPushButton("Open Folder")
+        self.browse_page = QWidget()
+        self.browse_layout = QVBoxLayout()
+        self.browse_page.setLayout(self.browse_layout)
+        self.create_browse_tab()
+        self.content_stack.addWidget(self.browse_page)
+
+        # Detail page: selected character with mods + preview + INI editor
+        self.detail_page = QWidget()
+        detail_layout = QVBoxLayout()
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_page.setLayout(detail_layout)
+
+        detail_header = QHBoxLayout()
+        self.back_to_overview_btn = QPushButton("<- Back")
+        self.back_to_overview_btn.clicked.connect(self.show_overview_screen)
+        self.detail_character_label = QLabel("No character selected")
+        self.detail_character_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        detail_header.addWidget(self.back_to_overview_btn)
+        detail_header.addWidget(self.detail_character_label)
+        detail_header.addStretch()
+        detail_layout.addLayout(detail_header)
+
+        detail_action_row = QHBoxLayout()
+        self.open_folder_btn = QPushButton("Open Character Folder")
         self.open_folder_btn.clicked.connect(self.open_selected_folder)
-        right_layout.addWidget(self.open_folder_btn)
-                # ---------- Add Preview QLabel ----------
+        self.open_mod_folder_btn = QPushButton("Open Selected Mod Folder")
+        self.open_mod_folder_btn.clicked.connect(self.open_selected_mod_folder)
+        detail_action_row.addWidget(self.open_folder_btn)
+        detail_action_row.addWidget(self.open_mod_folder_btn)
+        detail_action_row.addStretch()
+        detail_layout.addLayout(detail_action_row)
+
+        detail_body = QHBoxLayout()
+
+        # Left column: mod list and toggles
+        mod_column = QVBoxLayout()
+
+        # Enable/Disable button
+        self.toggle_mod_btn = QPushButton("Enable/Disable Selected Mod")
+        self.toggle_mod_btn.clicked.connect(self.toggle_selected_mod)
+        mod_column.addWidget(self.toggle_mod_btn)
+
+        self.mod_list_widget = ModListWidget()
+        self.mod_list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.mod_list_widget.itemClicked.connect(self.select_mod)
+        self.mod_list_widget.mod_manager = self
+        mod_column.addWidget(self.mod_list_widget, 1)
+        detail_body.addLayout(mod_column, 2)
+
+        # Right column: preview and INI editor
+        preview_ini_column = QVBoxLayout()
+
         # ---------- Preview Setup ----------
         self.preview_label = QLabel("No preview available")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -595,27 +847,894 @@ class ModManager(QWidget):
         self.next_img_btn.setEnabled(False)
         preview_layout.addWidget(self.next_img_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Add the horizontal layout to the right_layout
-        right_layout.addLayout(preview_layout)
+        # Add the horizontal layout to the right column
+        preview_ini_column.addLayout(preview_layout)
 
+        ini_header = QLabel("Key Binding Editor")
+        ini_header.setStyleSheet("font-size: 14px; font-weight: bold;")
+        preview_ini_column.addWidget(ini_header)
 
-        # Enable/Disable button
-        self.toggle_mod_btn = QPushButton("Enable/Disable Selected Mod")
-        self.toggle_mod_btn.clicked.connect(self.toggle_selected_mod)
-        right_layout.addWidget(self.toggle_mod_btn)
+        self.ini_file_label = QLabel("INI: No file selected")
+        self.ini_file_label.setWordWrap(True)
+        preview_ini_column.addWidget(self.ini_file_label)
 
-        self.mod_list_widget = ModListWidget()
-        self.mod_list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self.mod_list_widget.itemClicked.connect(self.select_mod)
-        self.mod_list_widget.mod_manager = self
-        right_layout.addWidget(self.mod_list_widget, 1)
-        
+        key_label = QLabel("Sections:")
+        preview_ini_column.addWidget(key_label)
+        self.ini_key_list = QListWidget()
+        self.ini_key_list.setMaximumHeight(160)
+        self.ini_key_list.currentRowChanged.connect(self.on_ini_key_changed)
+        preview_ini_column.addWidget(self.ini_key_list)
 
-        
-        center_layout.addLayout(right_layout,1)
+        fwd_row = QHBoxLayout()
+        fwd_row.addWidget(QLabel("Forward Key:"))
+        self.ini_value_input = QLineEdit()
+        self.ini_value_input.setPlaceholderText("e.g. VK_NUMPAD1")
+        fwd_row.addWidget(self.ini_value_input, 1)
+        preview_ini_column.addLayout(fwd_row)
 
-        main_layout.addLayout(center_layout)
+        back_row = QHBoxLayout()
+        back_row.addWidget(QLabel("Backward Key:"))
+        self.ini_back_input = QLineEdit()
+        self.ini_back_input.setPlaceholderText("e.g. h  (leave empty to remove)")
+        back_row.addWidget(self.ini_back_input, 1)
+        preview_ini_column.addLayout(back_row)
+
+        self.ini_status_label = QLabel("Select a mod to load key bindings.")
+        self.ini_status_label.setWordWrap(True)
+        preview_ini_column.addWidget(self.ini_status_label)
+
+        self.ini_save_btn = QPushButton("Save Key Binding")
+        self.ini_save_btn.clicked.connect(self.save_ini_value)
+        self.ini_save_btn.setEnabled(False)
+        preview_ini_column.addWidget(self.ini_save_btn)
+        preview_ini_column.addStretch()
+
+        detail_body.addLayout(preview_ini_column, 3)
+        detail_layout.addLayout(detail_body)
+        self.content_stack.addWidget(self.detail_page)
+
+        main_layout.addWidget(self.content_stack)
+        self.switch_to_modmanager_mode()
         self.apply_theme()
+
+    # -------------------- BROWSE TAB --------------------
+    def switch_to_modmanager_mode(self):
+        self.content_stack.setCurrentWidget(self.overview_page)
+        try:
+            self.mode_modmanager_btn.setEnabled(False)
+            self.mode_browse_btn.setEnabled(True)
+            self.search_input.setEnabled(True)
+        except Exception:
+            pass
+
+    def switch_to_browse_mode(self):
+        self.content_stack.setCurrentWidget(self.browse_page)
+        try:
+            self.mode_modmanager_btn.setEnabled(True)
+            self.mode_browse_btn.setEnabled(False)
+            self.search_input.setEnabled(False)
+        except Exception:
+            pass
+        if not self.browse_type_combo.count():
+            self.initialize_browse_for_game()
+
+    def create_browse_tab(self):
+        controls = QHBoxLayout()
+        self.browse_game_label = QLabel()
+        controls.addWidget(self.browse_game_label)
+        controls.addStretch()
+        controls.addWidget(QLabel("Target:"))
+        self.browse_target_label = QLabel("No character selected")
+        self.browse_target_label.setMaximumWidth(260)
+        controls.addWidget(self.browse_target_label)
+        self.browse_open_game_btn = QPushButton("Open GameBanana")
+        self.browse_open_game_btn.clicked.connect(self.open_gamebanana)
+        controls.addWidget(self.browse_open_game_btn)
+        self.browse_layout.addLayout(controls)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Search:"))
+        self.browse_search_input = QLineEdit()
+        self.browse_search_input.setPlaceholderText("Search GameBanana mods")
+        self.browse_search_input.returnPressed.connect(self.refresh_browse_mods)
+        filter_row.addWidget(self.browse_search_input, 1)
+        self.browse_search_btn = QPushButton("Search")
+        self.browse_search_btn.clicked.connect(self.refresh_browse_mods)
+        filter_row.addWidget(self.browse_search_btn)
+        self.browse_clear_search_btn = QPushButton("Clear")
+        self.browse_clear_search_btn.clicked.connect(self.clear_browse_search)
+        filter_row.addWidget(self.browse_clear_search_btn)
+        filter_row.addWidget(QLabel("Type:"))
+        self.browse_type_combo = QComboBox()
+        self.browse_type_combo.currentIndexChanged.connect(self.on_browse_type_changed)
+        filter_row.addWidget(self.browse_type_combo)
+        filter_row.addWidget(QLabel("Sort:"))
+        self.browse_sort_combo = QComboBox()
+        for label, value in BROWSE_SORTS:
+            self.browse_sort_combo.addItem(label, value)
+        self.browse_sort_combo.currentIndexChanged.connect(lambda _: self.refresh_browse_mods())
+        filter_row.addWidget(self.browse_sort_combo)
+        self.browse_layout.addLayout(filter_row)
+
+        body = QHBoxLayout()
+
+        left_col = QVBoxLayout()
+        left_col.addWidget(QLabel("Categories"))
+        self.browse_category_list = QListWidget()
+        self.browse_category_list.itemClicked.connect(self.on_browse_category_selected)
+        left_col.addWidget(self.browse_category_list, 1)
+        body.addLayout(left_col, 1)
+
+        center_col = QVBoxLayout()
+        self.browse_cards_scroll = QScrollArea()
+        self.browse_cards_scroll.setWidgetResizable(True)
+        self.browse_cards_content = QWidget()
+        self.browse_cards_grid = QGridLayout()
+        self.browse_cards_grid.setContentsMargins(8, 8, 8, 8)
+        self.browse_cards_grid.setSpacing(8)
+        self.browse_cards_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.browse_cards_content.setLayout(self.browse_cards_grid)
+        self.browse_cards_scroll.setWidget(self.browse_cards_content)
+        center_col.addWidget(self.browse_cards_scroll, 1)
+        self.browse_load_more_btn = QPushButton("Load More")
+        self.browse_load_more_btn.clicked.connect(self.load_more_browse)
+        self.browse_load_more_btn.setEnabled(False)
+        center_col.addWidget(self.browse_load_more_btn)
+        body.addLayout(center_col, 3)
+
+        right_col = QVBoxLayout()
+        self.browse_detail_preview = QLabel("No preview")
+        self.browse_detail_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.browse_detail_preview.setFixedHeight(220)
+        self.browse_detail_preview.setStyleSheet("border: 1px solid #555; background-color: #111;")
+        right_col.addWidget(self.browse_detail_preview)
+
+        self.browse_mod_info_label = QLabel("Select a mod.")
+        self.browse_mod_info_label.setWordWrap(True)
+        right_col.addWidget(self.browse_mod_info_label)
+
+        self.browse_description = QTextEdit()
+        self.browse_description.setReadOnly(True)
+        self.browse_description.setMaximumHeight(180)
+        right_col.addWidget(self.browse_description)
+
+        self.browse_open_profile_btn = QPushButton("Open Mod Page")
+        self.browse_open_profile_btn.setEnabled(False)
+        self.browse_open_profile_btn.clicked.connect(self.open_selected_browse_profile)
+        right_col.addWidget(self.browse_open_profile_btn)
+
+        right_col.addWidget(QLabel("Files"))
+        self.browse_files_list = QListWidget()
+        self.browse_files_list.itemClicked.connect(self.on_browse_file_selected)
+        self.browse_files_list.setMaximumHeight(150)
+        right_col.addWidget(self.browse_files_list)
+
+        self.browse_install_btn = QPushButton("Queue Download + Install")
+        self.browse_install_btn.setEnabled(False)
+        self.browse_install_btn.clicked.connect(self.enqueue_selected_browse_download)
+        right_col.addWidget(self.browse_install_btn)
+
+        self.browse_progress = QProgressBar()
+        self.browse_progress.setRange(0, 100)
+        self.browse_progress.setValue(0)
+        right_col.addWidget(self.browse_progress)
+
+        right_col.addWidget(QLabel("Downloads"))
+        self.browse_downloads_list = QListWidget()
+        self.browse_downloads_list.setMaximumHeight(180)
+        right_col.addWidget(self.browse_downloads_list)
+
+        self.browse_status_label = QLabel("Loading browse data...")
+        self.browse_status_label.setWordWrap(True)
+        right_col.addWidget(self.browse_status_label)
+        body.addLayout(right_col, 2)
+
+        self.browse_layout.addLayout(body)
+        self.initialize_browse_for_game()
+
+    def initialize_browse_for_game(self):
+        cfg = BROWSE_GAME_DATA.get(self.selected_game)
+        self.browse_game_label.setText(f"Browse: {GAMES.get(self.selected_game, self.selected_game)}")
+        self.update_browse_target_label()
+        self.browse_type_combo.blockSignals(True)
+        self.browse_type_combo.clear()
+        if cfg:
+            for entry in cfg.get("types", []):
+                self.browse_type_combo.addItem(entry["name"], entry)
+        self.browse_type_combo.blockSignals(False)
+        self.browse_search_input.clear()
+        self.browse_description.clear()
+        self.browse_status_label.setText("Loading categories...")
+        self.browse_open_profile_btn.setEnabled(False)
+        self.browse_install_btn.setEnabled(False)
+        self.browse_progress.setValue(0)
+        self.browse_selected_mod = None
+        self.browse_selected_file = None
+        self.browse_selected_index = -1
+        self.browse_results_data = []
+        self.browse_category_list.clear()
+        self._clear_browse_cards()
+        self._refresh_browse_downloads_list()
+        if self.browse_type_combo.count():
+            self.on_browse_type_changed(self.browse_type_combo.currentIndex())
+
+    def update_browse_target_label(self):
+        if self.selected_item:
+            category_name = (self.selected_category or "").capitalize()
+            item_name = self.selected_item.get("name", "Unknown")
+            self.browse_target_label.setText(f"{category_name}: {item_name}")
+        else:
+            self.browse_target_label.setText("No destination selected")
+
+    def on_browse_type_changed(self, index):
+        entry = self.browse_type_combo.itemData(index)
+        self.browse_selected_type = entry
+        # Type changes should apply immediately; do not keep stale text-search route active.
+        self.browse_search_input.clear()
+        self.browse_category_list.clear()
+        home_item = QListWidgetItem("Featured")
+        home_item.setData(Qt.ItemDataRole.UserRole, {"mode": "home", "id": None, "name": "Featured"})
+        self.browse_category_list.addItem(home_item)
+        if not entry:
+            return
+        token = self._next_browse_token()
+        self.browse_categories_token = token
+        self.browse_status_label.setText("Loading categories...")
+        threading.Thread(target=self._browse_load_categories_worker, args=(token, entry), daemon=True).start()
+
+    def on_browse_category_selected(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        mode = data.get("mode", "category")
+        name = data.get("name", "")
+        if mode == "home":
+            self.browse_route = ("home", None)
+        else:
+            self.browse_route = ("category", {"id": data.get("id"), "name": name})
+        self.refresh_browse_mods()
+
+    def refresh_browse_mods(self, force_route=None):
+        if force_route is not None:
+            self.browse_route = force_route
+        else:
+            query = (self.browse_search_input.text() or "").strip()
+            if query:
+                self.browse_route = ("search", query)
+            elif self.browse_route[0] == "search":
+                self.browse_route = ("home", None)
+        self._start_browse_route_load(reset=True)
+
+    def clear_browse_search(self):
+        self.browse_search_input.clear()
+        self.refresh_browse_mods()
+
+    def load_more_browse(self):
+        if self.browse_loading or not self.browse_has_more:
+            return
+        self._start_browse_route_load(reset=False)
+
+    def _start_browse_route_load(self, reset=False):
+        if self.browse_loading:
+            return
+        if reset:
+            self.browse_current_page = 1
+            self.browse_has_more = False
+            self.browse_results_data = []
+            self.browse_selected_mod = None
+            self.browse_selected_file = None
+            self.browse_selected_index = -1
+            self._clear_browse_cards()
+            self.browse_files_list.clear()
+            self.browse_description.clear()
+            self.browse_detail_preview.setPixmap(QPixmap())
+            self.browse_detail_preview.setText("No preview")
+            self.browse_mod_info_label.setText("Loading mods...")
+            self.browse_open_profile_btn.setEnabled(False)
+            self.browse_install_btn.setEnabled(False)
+        self.browse_loading = True
+        self.browse_load_more_btn.setEnabled(False)
+        token = self._next_browse_token()
+        self.browse_mods_token = token
+        page = self.browse_current_page if not reset else 1
+        threading.Thread(target=self._browse_load_mods_worker, args=(token, page, self.browse_route), daemon=True).start()
+
+    def _next_browse_token(self):
+        self.browse_request_token += 1
+        return self.browse_request_token
+
+    def _browse_api_json(self, endpoint, timeout=30):
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            url = endpoint
+        else:
+            url = "https://gamebanana.com/apiv11/" + endpoint.lstrip("/")
+        req = urllib.request.Request(url, headers={"User-Agent": "ModManager-Browse"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+    def _normalize_records(self, payload):
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("_aRecords", "records", "_aData", "data", "_aItems", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            values = list(payload.values())
+            if values and all(isinstance(v, dict) for v in values):
+                return values
+        return []
+
+    def _extract_preview_url(self, rec):
+        media = rec.get("_aPreviewMedia") if isinstance(rec, dict) else None
+        images = None
+        if isinstance(media, dict):
+            images = media.get("_aImages")
+            if images is None:
+                values = list(media.values())
+                if values and isinstance(values[0], list):
+                    images = values[0]
+                elif isinstance(values, list):
+                    images = values
+        elif isinstance(media, list):
+            images = media
+        if isinstance(images, list):
+            for img in images:
+                if not isinstance(img, dict):
+                    continue
+                base = img.get("_sBaseUrl") or ""
+                for key in ("_sFile530", "_sFile220", "_sFile100", "_sFile"):
+                    file_name = img.get(key)
+                    if base and file_name:
+                        return f"{base}/{file_name}"
+                for key in ("_sUrl", "url"):
+                    url = img.get(key)
+                    if url:
+                        return url
+        for key in ("_sPreviewUrl", "preview", "thumbnail"):
+            url = rec.get(key) if isinstance(rec, dict) else None
+            if url:
+                return url
+        return None
+
+    def _extract_file_entries(self, rec):
+        files = rec.get("_aFiles") if isinstance(rec, dict) else None
+        if isinstance(files, dict):
+            files = list(files.values())
+        result = []
+        if isinstance(files, list):
+            for file_entry in files:
+                if not isinstance(file_entry, dict):
+                    continue
+                url = file_entry.get("_sDownloadUrl") or file_entry.get("_sUrl") or file_entry.get("url")
+                if isinstance(url, str) and url:
+                    if url.startswith("/"):
+                        url = "https://gamebanana.com" + url
+                    result.append({
+                        "id": file_entry.get("_idRow"),
+                        "name": file_entry.get("_sFile") or file_entry.get("_sName") or "download",
+                        "size": file_entry.get("_nFilesize") or 0,
+                        "url": url,
+                    })
+        return result
+
+    def _html_to_text(self, value):
+        if not value:
+            return ""
+        text = re.sub(r"<br\s*/?>", "\n", str(value), flags=re.IGNORECASE)
+        text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)
+        return html.unescape(text).strip()
+
+    def _browse_load_categories_worker(self, token, type_entry):
+        try:
+            rows = self._browse_api_json(
+                f"Mod/Categories?_idCategoryRow={type_entry['id']}&_sSort=a_to_z&_bShowEmpty=true",
+                timeout=20,
+            )
+            records = self._normalize_records(rows)
+            cats = []
+            if isinstance(records, list):
+                for rec in records:
+                    if not isinstance(rec, dict):
+                        continue
+                    cats.append({
+                        "id": rec.get("_idRow"),
+                        "name": rec.get("_sName") or "Unnamed",
+                    })
+            self.browse_message_queue.put(("categories_loaded", token, type_entry, cats))
+        except Exception as e:
+            self.browse_message_queue.put(("categories_error", token, type_entry, str(e)))
+
+    def _browse_load_mods_worker(self, token, page, route):
+        try:
+            cfg = BROWSE_GAME_DATA.get(self.selected_game) or {}
+            game_id = cfg.get("game_id", "")
+            if not game_id:
+                raise RuntimeError("No GameBanana game id configured for selected game")
+
+            raw_sort = self.browse_sort_combo.currentData() if hasattr(self, "browse_sort_combo") else "default"
+            sort_map = {
+                "new": "new",
+                "updated": "updated",
+                "popular": "hot",
+            }
+            sort_value = sort_map.get(raw_sort)
+
+            if route[0] == "search":
+                term = quote(str(route[1] or ""))
+                endpoint = f"Util/Search/Results?_sModelName=Mod&_sOrder=best_match&_idGameRow={game_id}&_sSearchString={term}&_nPage={page}"
+            elif route[0] == "category":
+                cat_id = (route[1] or {}).get("id")
+                if not cat_id and self.browse_selected_type:
+                    cat_id = self.browse_selected_type.get("id")
+                if not cat_id:
+                    raise RuntimeError("No category selected")
+                params = [
+                    ("_nPerpage", "15"),
+                    ("_aFilters[Generic_Category]", str(cat_id)),
+                    ("_nPage", str(page)),
+                ]
+                if sort_value:
+                    params.append(("_sSort", sort_value))
+                endpoint = f"Mod/Index?{urlencode(params)}"
+            else:
+                params = [
+                    ("_csvModelInclusions", "Mod"),
+                    ("_nPage", str(page)),
+                ]
+                if sort_value:
+                    params.append(("_sSort", sort_value))
+                endpoint = f"Game/{game_id}/Subfeed?{urlencode(params)}"
+            payload = self._browse_api_json(endpoint, timeout=30)
+            records = self._normalize_records(payload)
+            items = []
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                model_name = (rec.get("_sModelName") or "Mod").lower()
+                if model_name not in ("mod", ""):
+                    continue
+                mod_id = rec.get("_idRow") or rec.get("id")
+                if not mod_id:
+                    continue
+                submitter = rec.get("_aSubmitter") or rec.get("_sSubmitter") or rec.get("_sOwnerName") or "Unknown"
+                if isinstance(submitter, dict):
+                    submitter = submitter.get("_sName") or submitter.get("name") or "Unknown"
+                items.append({
+                    "id": mod_id,
+                    "route": f"Mod/{mod_id}",
+                    "name": rec.get("_sName") or "Unnamed Mod",
+                    "profile": rec.get("_sProfileUrl") or f"https://gamebanana.com/mods/{mod_id}",
+                    "preview": self._extract_preview_url(rec),
+                    "submitter": str(submitter),
+                    "summary": self._html_to_text(rec.get("_sText") or rec.get("_sDescription") or ""),
+                    "files": [],
+                })
+            self.browse_message_queue.put(("mods_loaded", token, page, items, len(items) >= 15))
+        except Exception as e:
+            self.browse_message_queue.put(("mods_error", token, str(e)))
+
+    def _browse_load_details_worker(self, token, route):
+        try:
+            payload = self._browse_api_json(f"{route}/ProfilePage", timeout=30)
+            detail = {
+                "route": route,
+                "description": self._html_to_text(payload.get("_sText") or payload.get("_sDescription") or ""),
+                "files": self._extract_file_entries(payload),
+                "preview": self._extract_preview_url(payload),
+                "profile": payload.get("_sProfileUrl") or f"https://gamebanana.com/{route.replace('Mod', 'mods')}",
+                "submitter": payload.get("_aSubmitter", {}),
+            }
+            self.browse_message_queue.put(("detail_loaded", token, detail))
+        except Exception as e:
+            self.browse_message_queue.put(("detail_error", token, route, str(e)))
+
+    def _browse_image_worker(self, idx, url):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ModManager-Browse"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+            if data:
+                self.browse_preview_cache[url] = data
+                self.browse_message_queue.put(("thumb_loaded", idx, url, data))
+        except Exception:
+            pass
+
+    def _process_browse_queue(self):
+        processed = 0
+        while not self.browse_message_queue.empty() and processed < 30:
+            try:
+                msg = self.browse_message_queue.get_nowait()
+            except Exception:
+                break
+            kind = msg[0]
+            if kind == "categories_loaded":
+                _, token, type_entry, cats = msg
+                if token != self.browse_categories_token:
+                    processed += 1
+                    continue
+                self.browse_category_list.clear()
+                featured = QListWidgetItem("Featured")
+                featured.setData(Qt.ItemDataRole.UserRole, {"mode": "home", "id": None, "name": "Featured"})
+                self.browse_category_list.addItem(featured)
+                all_type = QListWidgetItem(f"All {type_entry['name']}")
+                all_type.setData(Qt.ItemDataRole.UserRole, {"mode": "category", "id": type_entry["id"], "name": type_entry["name"]})
+                self.browse_category_list.addItem(all_type)
+                default_route = ("category", {"id": type_entry["id"], "name": type_entry["name"]})
+                if cats:
+                    for cat in cats:
+                        item = QListWidgetItem(cat["name"])
+                        item.setData(Qt.ItemDataRole.UserRole, {"mode": "category", "id": cat["id"], "name": cat["name"]})
+                        self.browse_category_list.addItem(item)
+                else:
+                    pass
+                self.browse_category_list.setCurrentRow(1)
+                self.refresh_browse_mods(force_route=default_route)
+            elif kind == "categories_error":
+                _, token, type_entry, err = msg
+                if token != self.browse_categories_token:
+                    processed += 1
+                    continue
+                self.browse_category_list.clear()
+                featured = QListWidgetItem("Featured")
+                featured.setData(Qt.ItemDataRole.UserRole, {"mode": "home", "id": None, "name": "Featured"})
+                self.browse_category_list.addItem(featured)
+                all_type = QListWidgetItem(f"All {type_entry['name']}")
+                all_type.setData(Qt.ItemDataRole.UserRole, {"mode": "category", "id": type_entry["id"], "name": type_entry["name"]})
+                self.browse_category_list.addItem(all_type)
+                self.browse_status_label.setText(f"Category fallback in use: {err}")
+                self.browse_category_list.setCurrentRow(1)
+                self.refresh_browse_mods(force_route=("category", {"id": type_entry["id"], "name": type_entry["name"]}))
+            elif kind == "mods_loaded":
+                _, token, page, items, has_more = msg
+                if token != self.browse_mods_token:
+                    processed += 1
+                    continue
+                self.browse_loading = False
+                self.browse_has_more = has_more
+                self.browse_load_more_btn.setEnabled(has_more)
+                start_idx = len(self.browse_results_data)
+                self.browse_results_data.extend(items)
+                self.browse_current_page = page + 1
+                self.render_browse_cards()
+                self.browse_status_label.setText(f"Loaded {len(self.browse_results_data)} mod(s).")
+                if start_idx == 0 and self.browse_results_data:
+                    self.select_browse_mod_by_index(0)
+            elif kind == "mods_error":
+                _, token, err = msg
+                if token != self.browse_mods_token:
+                    processed += 1
+                    continue
+                self.browse_loading = False
+                self.browse_has_more = False
+                self.browse_load_more_btn.setEnabled(False)
+                self.browse_status_label.setText(f"Browse error: {err}")
+            elif kind == "detail_loaded":
+                _, token, detail = msg
+                mod = self.browse_selected_mod
+                if not mod or token != self.browse_detail_token or detail.get("route") != mod.get("route"):
+                    processed += 1
+                    continue
+                mod["files"] = detail.get("files", [])
+                mod["profile"] = detail.get("profile") or mod.get("profile")
+                if detail.get("preview"):
+                    mod["preview"] = detail.get("preview")
+                description = detail.get("description") or mod.get("summary") or ""
+                self.browse_description.setPlainText(description or "No description.")
+                self.browse_files_list.clear()
+                for file_entry in mod.get("files", []):
+                    self.browse_files_list.addItem(file_entry.get("name", "download"))
+                self.browse_status_label.setText(f"Found {len(mod.get('files', []))} file(s).")
+                self._update_browse_detail_preview(mod.get("preview"))
+            elif kind == "detail_error":
+                _, token, route, err = msg
+                mod = self.browse_selected_mod
+                if mod and token == self.browse_detail_token and route == mod.get("route"):
+                    self.browse_description.setPlainText(mod.get("summary") or "No description.")
+                    self.browse_status_label.setText(f"Detail load failed: {err}")
+            elif kind == "thumb_loaded":
+                _, idx, url, data = msg
+                if idx < len(self.browse_card_img_labels):
+                    pix = QPixmap()
+                    if pix.loadFromData(data):
+                        self.browse_card_img_labels[idx].setPixmap(
+                            pix.scaled(190, 105, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                        )
+                        self.browse_card_img_labels[idx].setText("")
+                if self.browse_selected_mod and self.browse_selected_mod.get("preview") == url:
+                    self._update_browse_detail_preview(url)
+            elif kind == "download_progress":
+                _, item_id, pct, text = msg
+                if self.browse_download_current and self.browse_download_current.get("id") == item_id:
+                    self.browse_progress.setValue(max(0, min(100, pct)))
+                    self.browse_status_label.setText(text)
+                    self.browse_download_current["status"] = text
+                    self._refresh_browse_downloads_list()
+            elif kind == "download_complete":
+                _, item_id, install_path = msg
+                if self.browse_download_current and self.browse_download_current.get("id") == item_id:
+                    self.browse_download_current["state"] = "completed"
+                    self.browse_download_current["status"] = f"Installed to {install_path}"
+                    self.browse_download_history.insert(0, dict(self.browse_download_current))
+                    self.browse_download_current = None
+                    self.browse_progress.setValue(100)
+                    self.browse_status_label.setText(f"Installed: {install_path}")
+                    self.load_mods()
+                    self._refresh_browse_downloads_list()
+                    self._start_next_browse_download()
+            elif kind == "download_failed":
+                _, item_id, err = msg
+                if self.browse_download_current and self.browse_download_current.get("id") == item_id:
+                    self.browse_download_current["state"] = "failed"
+                    self.browse_download_current["status"] = err
+                    self.browse_download_history.insert(0, dict(self.browse_download_current))
+                    self.browse_download_current = None
+                    self.browse_progress.setValue(0)
+                    self.browse_status_label.setText(err)
+                    self._refresh_browse_downloads_list()
+                    self._start_next_browse_download()
+            processed += 1
+
+    def _clear_browse_cards(self):
+        for i in reversed(range(self.browse_cards_grid.count())):
+            item = self.browse_cards_grid.itemAt(i)
+            widget = item.widget() if item else None
+            if widget:
+                widget.setParent(None)
+        self.browse_card_frames = []
+        self.browse_card_img_labels = []
+
+    def _browse_card_style(self, selected=False):
+        if selected:
+            return "QFrame{border:2px solid #d4af37;border-radius:8px;background:#262626;}"
+        return "QFrame{border:1px solid #555;border-radius:8px;background:#1f1f1f;}QFrame:hover{border:1px solid #d4af37;}"
+
+    def _update_browse_card_selection(self):
+        for idx, frame in enumerate(self.browse_card_frames):
+            try:
+                frame.setStyleSheet(self._browse_card_style(idx == self.browse_selected_index))
+            except Exception:
+                pass
+
+    def _browse_columns(self):
+        try:
+            avail = self.browse_cards_scroll.viewport().width()
+        except Exception:
+            avail = 700
+        card_w = 205
+        cols = max(1, int(avail // card_w))
+        return cols
+
+    def render_browse_cards(self, start_idx=0):
+        del start_idx
+        self._clear_browse_cards()
+        cols = self._browse_columns()
+        row = 0
+        col = 0
+        for idx in range(0, len(self.browse_results_data)):
+            data = self.browse_results_data[idx]
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.Box)
+            frame.setStyleSheet(self._browse_card_style(False))
+            layout = QVBoxLayout(frame)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.setSpacing(4)
+
+            img = QLabel("...")
+            img.setFixedSize(190, 105)
+            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img.setStyleSheet("background:#111;color:#777;")
+            cached = self.browse_preview_cache.get(data.get("preview"))
+            if cached:
+                pix = QPixmap()
+                if pix.loadFromData(cached):
+                    img.setPixmap(pix.scaled(190, 105, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+                    img.setText("")
+            layout.addWidget(img)
+
+            name = QLabel(data.get("name", ""))
+            name.setWordWrap(True)
+            name.setMaximumHeight(40)
+            layout.addWidget(name)
+
+            author = QLabel(f"by {data.get('submitter', 'Unknown')}")
+            author.setStyleSheet("color:#b5b5b5;font-size:11px;")
+            layout.addWidget(author)
+
+            frame.mousePressEvent = lambda e, i=idx: self.select_browse_mod_by_index(i)
+            self.browse_cards_grid.addWidget(frame, row, col)
+            self.browse_card_frames.append(frame)
+            self.browse_card_img_labels.append(img)
+
+            preview_url = data.get("preview")
+            if preview_url and preview_url not in self.browse_preview_cache:
+                threading.Thread(target=self._browse_image_worker, args=(idx, preview_url), daemon=True).start()
+
+            col += 1
+            if col >= cols:
+                col = 0
+                row += 1
+        self._update_browse_card_selection()
+
+    def select_browse_mod_by_index(self, idx):
+        if idx < 0 or idx >= len(self.browse_results_data):
+            return
+        self.browse_selected_index = idx
+        self._update_browse_card_selection()
+        mod = self.browse_results_data[idx]
+        self.browse_selected_mod = mod
+        self.browse_selected_file = None
+        self.browse_install_btn.setEnabled(False)
+        self.browse_open_profile_btn.setEnabled(bool(mod.get("profile")))
+        self.browse_mod_info_label.setText(
+            f"{mod.get('name', 'Unnamed Mod')}\nby {mod.get('submitter', 'Unknown')}\n{mod.get('profile', '')}"
+        )
+        self.browse_description.setPlainText(mod.get("summary") or "Loading details...")
+        self.browse_files_list.clear()
+        self._update_browse_detail_preview(mod.get("preview"))
+        token = self._next_browse_token()
+        self.browse_detail_token = token
+        threading.Thread(target=self._browse_load_details_worker, args=(token, mod.get("route")), daemon=True).start()
+
+    def _update_browse_detail_preview(self, preview_url):
+        if not preview_url:
+            self.browse_detail_preview.setPixmap(QPixmap())
+            self.browse_detail_preview.setText("No preview")
+            return
+        data = self.browse_preview_cache.get(preview_url)
+        if not data:
+            self.browse_detail_preview.setPixmap(QPixmap())
+            self.browse_detail_preview.setText("Loading preview...")
+            threading.Thread(target=self._browse_image_worker, args=(self.browse_selected_index, preview_url), daemon=True).start()
+            return
+        pix = QPixmap()
+        if pix.loadFromData(data):
+            self.browse_detail_preview.setPixmap(
+                pix.scaled(520, 220, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            )
+            self.browse_detail_preview.setText("")
+        else:
+            self.browse_detail_preview.setPixmap(QPixmap())
+            self.browse_detail_preview.setText("No preview")
+
+    def on_browse_file_selected(self, item):
+        if not item or not self.browse_selected_mod:
+            return
+        row = self.browse_files_list.row(item)
+        files = self.browse_selected_mod.get("files", [])
+        if row < 0 or row >= len(files):
+            return
+        self.browse_selected_file = files[row]
+        self.browse_install_btn.setEnabled(self.selected_item is not None)
+
+    def open_selected_browse_profile(self):
+        if not self.browse_selected_mod:
+            return
+        url = self.browse_selected_mod.get("profile")
+        if url:
+            webbrowser.open(url)
+
+    def enqueue_selected_browse_download(self):
+        if not self.selected_item:
+            QMessageBox.warning(self, "Select Destination", "Select a destination folder (character/UI/weapon/NPC/etc.) first.")
+            return
+        if not self.browse_selected_mod or not self.browse_selected_file:
+            QMessageBox.warning(self, "Select File", "Select a mod file to install.")
+            return
+        self.browse_download_counter += 1
+        file_entry = self.browse_selected_file
+        item = {
+            "id": self.browse_download_counter,
+            "state": "queued",
+            "status": "Queued",
+            "mod_name": self.browse_selected_mod.get("name", "Mod"),
+            "file_name": file_entry.get("name", "download"),
+            "url": file_entry.get("url"),
+            "preview": self.browse_selected_mod.get("preview"),
+            "game": self.selected_game,
+            "dest_category": self.selected_category,
+            "dest_id": self.selected_item.get("id"),
+            "dest_name": self.selected_item.get("name", "Unknown"),
+        }
+        self.browse_download_queue.append(item)
+        self._refresh_browse_downloads_list()
+        self.browse_status_label.setText(f"Queued: {item['mod_name']}")
+        self._start_next_browse_download()
+
+    def _refresh_browse_downloads_list(self):
+        self.browse_downloads_list.clear()
+        if self.browse_download_current:
+            current = self.browse_download_current
+            self.browse_downloads_list.addItem(f"[ACTIVE] {current['mod_name']} - {current['status']}")
+        for item in self.browse_download_queue:
+            self.browse_downloads_list.addItem(f"[QUEUE] {item['mod_name']} - {item['file_name']}")
+        for item in self.browse_download_history[:8]:
+            label = "OK" if item.get("state") == "completed" else "FAIL"
+            self.browse_downloads_list.addItem(f"[{label}] {item['mod_name']} - {item.get('status', '')}")
+
+    def _start_next_browse_download(self):
+        if self.browse_download_current or not self.browse_download_queue:
+            return
+        self.browse_download_current = self.browse_download_queue.pop(0)
+        self.browse_download_current["state"] = "downloading"
+        self.browse_download_current["status"] = "Downloading"
+        self.browse_progress.setValue(0)
+        self._refresh_browse_downloads_list()
+        threading.Thread(target=self._browse_download_worker, args=(dict(self.browse_download_current),), daemon=True).start()
+
+    def _safe_mod_folder_name(self, value):
+        cleaned = re.sub(r'[\\/:*?"<>|]+', "_", value or "mod")
+        cleaned = cleaned.strip().strip(".")
+        return cleaned or "mod"
+
+    def _extract_archive(self, archive_path, out_dir):
+        ext = os.path.splitext(archive_path)[1].lower()
+        if ext == ".zip":
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(out_dir)
+            return
+        if ext in (".rar", ".7z"):
+            seven_zip = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+            if not seven_zip:
+                raise RuntimeError("7z is required to extract RAR/7z archives.")
+            result = subprocess.run([seven_zip, "x", archive_path, f"-o{out_dir}", "-y"], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or result.stdout or "Extract failed")
+            return
+        raise RuntimeError(f"Unsupported archive type: {ext}")
+
+    def _browse_download_worker(self, item):
+        try:
+            target_root = os.path.join(
+                settings["mod_paths"].get(item["game"], default_mod_paths[item["game"]]),
+            )
+            target_root = build_item_folder_path(target_root, item["dest_category"], item.get("dest_id"))
+            os.makedirs(target_root, exist_ok=True)
+            base_name = self._safe_mod_folder_name(item["mod_name"])
+            target_path = os.path.join(target_root, base_name)
+            copy_idx = 1
+            while os.path.exists(target_path):
+                target_path = os.path.join(target_root, f"{base_name}_copy{copy_idx}")
+                copy_idx += 1
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                archive_name = os.path.basename(item["file_name"]) or "download.zip"
+                archive_path = os.path.join(temp_dir, archive_name)
+
+                def progress(downloaded, total):
+                    pct = int(downloaded * 100 / total) if total else 0
+                    self.browse_message_queue.put((
+                        "download_progress",
+                        item["id"],
+                        pct,
+                        f"Downloading {item['mod_name']} ({pct}%)",
+                    ))
+
+                if not download_url_to_path(item["url"], archive_path, progress_callback=progress):
+                    raise RuntimeError("Download failed")
+
+                self.browse_message_queue.put(("download_progress", item["id"], 100, "Extracting archive"))
+                extract_dir = os.path.join(temp_dir, "extract")
+                os.makedirs(extract_dir, exist_ok=True)
+                self._extract_archive(archive_path, extract_dir)
+
+                entries = [os.path.join(extract_dir, name) for name in os.listdir(extract_dir)]
+                if len(entries) == 1 and os.path.isdir(entries[0]):
+                    shutil.copytree(entries[0], target_path)
+                else:
+                    os.makedirs(target_path, exist_ok=True)
+                    for entry in entries:
+                        dest = os.path.join(target_path, os.path.basename(entry))
+                        if os.path.isdir(entry):
+                            shutil.copytree(entry, dest)
+                        else:
+                            shutil.copy2(entry, dest)
+
+                if item.get("preview"):
+                    self.save_preview_image_for_installed_mod(item["preview"], target_path)
+
+            self.browse_message_queue.put(("download_complete", item["id"], target_path))
+        except Exception as e:
+            self.browse_message_queue.put(("download_failed", item["id"], str(e)))
 
     # -------------------- SETTINGS TAB --------------------
     def create_settings_tab(self):
@@ -955,6 +2074,10 @@ class ModManager(QWidget):
         if folder:
             settings["mod_paths"][game] = folder
             self.path_labels[game].setText(f"{GAMES[game]}: {folder}")
+            try:
+                os.makedirs(os.path.join(folder, "BufferValues"), exist_ok=True)
+            except Exception:
+                pass
             save_settings()
             self.load_items()
 
@@ -963,10 +2086,15 @@ class ModManager(QWidget):
         self.selected_game = self.game_combo.currentData()
         settings["last_selected_game"] = self.selected_game
         save_settings()
+        self.ensure_buffer_values_folders()
         # Reapply theme if game theme is selected (to update accent colors)
         if settings.get("theme", "dark") == "game":
             self.apply_theme()
         self.load_items()
+        try:
+            self.initialize_browse_for_game()
+        except Exception:
+            pass
         try:
             self.update_fixes_tab()
         except Exception:
@@ -997,8 +2125,11 @@ class ModManager(QWidget):
             QMessageBox.information(self, "Info", "No RabbitFX download configured for this game.")
 
     def tab_changed(self,index):
-        if index < len(CATEGORIES):
-            self.selected_category = CATEGORIES[index]
+        tab_text = (self.tab_widget.tabText(index) or "").strip().lower()
+        category_map = {cat.lower(): cat for cat in CATEGORIES}
+        category_map["ui"] = "ui"
+        if tab_text in category_map:
+            self.selected_category = category_map[tab_text]
             self.load_items()
         else:
             self.selected_item = None
@@ -1017,15 +2148,22 @@ class ModManager(QWidget):
             if widget:
                 widget.setParent(None)
 
-        json_file = os.path.join(RESOURCES,f"{self.selected_category}_{self.selected_game}.json")
-        if os.path.exists(json_file):
-            try:
-                with open(json_file,"r", encoding="utf-8") as f:
-                    self.items = json.load(f)
-            except Exception:
-                self.items = []
+        base_path = settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game])
+        main_cat_folder = build_item_folder_path(base_path, self.selected_category)
+
+        if self.selected_category == "buffervalues":
+            os.makedirs(main_cat_folder, exist_ok=True)
+            self.items = [{"id": "__root__", "name": "BufferValues"}]
         else:
-            self.items = []
+            json_file = os.path.join(RESOURCES,f"{self.selected_category}_{self.selected_game}.json")
+            if os.path.exists(json_file):
+                try:
+                    with open(json_file,"r", encoding="utf-8") as f:
+                        self.items = json.load(f)
+                except Exception:
+                    self.items = []
+            else:
+                self.items = []
 
         # Load added characters if this is the characters category
         if self.selected_category == "characters":
@@ -1037,8 +2175,7 @@ class ModManager(QWidget):
         self.items.sort(key=lambda x: (x["id"] not in favorites, x.get("name", "")))
 
         # Create main category folder if needed (ask user first)
-        base_path = settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game])
-        main_cat_folder = os.path.join(base_path, self.selected_category)
+        main_cat_folder = build_item_folder_path(base_path, self.selected_category)
         if not os.path.exists(main_cat_folder) and self.items:
             reply = QMessageBox.question(
                 self,
@@ -1054,7 +2191,7 @@ class ModManager(QWidget):
                     print(f"Failed to create folder: {e}")
         
         # Create item subfolders only if main folder exists
-        if os.path.exists(main_cat_folder):
+        if os.path.exists(main_cat_folder) and self.selected_category != "buffervalues":
             for item in self.items:
                 folder = os.path.join(main_cat_folder, item["id"])
                 try:
@@ -1253,9 +2390,8 @@ class ModManager(QWidget):
             # Get current character's mod folder
             char_mod_folder = os.path.join(
                 settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
-                self.selected_category,
-                self.selected_item["id"]
             )
+            char_mod_folder = build_item_folder_path(char_mod_folder, self.selected_category, self.selected_item["id"])
 
             os.makedirs(char_mod_folder, exist_ok=True)
 
@@ -1281,6 +2417,144 @@ class ModManager(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error Importing Mod", f"Failed to import mod:\n{e}")
             print(f"Error importing mod: {e}")
+
+    def import_mod_archive_path(self, archive_path):
+        """Import a local archive file by extracting into the selected destination folder."""
+        if not self.selected_item:
+            QMessageBox.warning(self, "No destination selected", "Please select a destination first!")
+            return
+        if not os.path.isfile(archive_path):
+            QMessageBox.warning(self, "Invalid File", "Dropped path is not a file.")
+            return
+        try:
+            base_root = settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game])
+            target_root = build_item_folder_path(base_root, self.selected_category, self.selected_item.get("id"))
+            os.makedirs(target_root, exist_ok=True)
+
+            base_name = self._safe_mod_folder_name(os.path.splitext(os.path.basename(archive_path))[0])
+            target_path = os.path.join(target_root, base_name)
+            copy_idx = 1
+            while os.path.exists(target_path):
+                target_path = os.path.join(target_root, f"{base_name}_copy{copy_idx}")
+                copy_idx += 1
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                extract_dir = os.path.join(temp_dir, "extract")
+                os.makedirs(extract_dir, exist_ok=True)
+                self._extract_archive(archive_path, extract_dir)
+
+                entries = [os.path.join(extract_dir, name) for name in os.listdir(extract_dir)]
+                if len(entries) == 1 and os.path.isdir(entries[0]):
+                    shutil.copytree(entries[0], target_path)
+                else:
+                    os.makedirs(target_path, exist_ok=True)
+                    for entry in entries:
+                        dest = os.path.join(target_path, os.path.basename(entry))
+                        if os.path.isdir(entry):
+                            shutil.copytree(entry, dest)
+                        else:
+                            shutil.copy2(entry, dest)
+
+            self.load_mods()
+            QMessageBox.information(self, "Mod Imported", f"Archive '{os.path.basename(archive_path)}' imported successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Importing Archive", f"Failed to import archive:\n{e}")
+            print(f"Error importing archive: {e}")
+
+    def import_mod_source(self, source_path):
+        """Import a dropped source path (folder or supported archive)."""
+        if not source_path:
+            return
+        if os.path.isdir(source_path):
+            self.import_mod_from_path(source_path)
+            return
+        if os.path.isfile(source_path):
+            ext = os.path.splitext(source_path)[1].lower()
+            if ext in (".zip", ".rar", ".7z"):
+                self.import_mod_archive_path(source_path)
+                return
+        QMessageBox.warning(self, "Unsupported Drop", "Drop a mod folder or a .zip/.rar/.7z archive.")
+
+    def _dropped_local_paths(self, mime_data):
+        """Extract local file/folder paths from a drop payload."""
+        paths = []
+        try:
+            if not mime_data or not mime_data.hasUrls():
+                return paths
+            for url in mime_data.urls():
+                local_path = url.toLocalFile()
+                if local_path and os.path.exists(local_path):
+                    paths.append(local_path)
+        except Exception:
+            return []
+        return paths
+
+    def dragEnterEvent(self, event):
+        """Accept drag operations that contain local files/folders."""
+        try:
+            if self._dropped_local_paths(event.mimeData()):
+                event.acceptProposedAction()
+                return
+        except Exception:
+            pass
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        """Maintain accepted copy-action while dragging over the app."""
+        try:
+            if self._dropped_local_paths(event.mimeData()):
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+        except Exception:
+            pass
+        event.ignore()
+
+    def dropEvent(self, event):
+        """Import dropped folders/files into the selected destination folder."""
+        try:
+            source_paths = self._dropped_local_paths(event.mimeData())
+            if not source_paths:
+                event.ignore()
+                return
+            if not self.selected_item:
+                QMessageBox.warning(
+                    self,
+                    "No destination selected",
+                    "Select a destination folder first, then drop mod folders/files to import.",
+                )
+                event.ignore()
+                return
+            for source_path in source_paths:
+                self.import_mod_source(source_path)
+            event.acceptProposedAction()
+        except Exception as e:
+            QMessageBox.critical(self, "Drop Error", f"Could not import dropped folder(s):\n{e}")
+            event.ignore()
+
+    def save_preview_image_for_installed_mod(self, preview_url, mod_folder):
+        """Download a preview image URL into the installed mod folder.
+
+        Returns saved file path on success, None on failure.
+        """
+        if not preview_url or not mod_folder or not os.path.isdir(mod_folder):
+            return None
+
+        ext = guess_image_extension_from_url(preview_url, default_ext=".jpg")
+        target_path = os.path.join(mod_folder, f"preview{ext}")
+
+        req = urllib.request.Request(preview_url, headers={"User-Agent": "ModManager-Preview"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            if not data:
+                return None
+            with open(target_path, "wb") as f:
+                f.write(data)
+            return target_path
+        except Exception as e:
+            print(f"Failed to save preview image ({preview_url}): {e}")
+            return None
 
 
     def arrange_grid(self, grid):
@@ -1357,13 +2631,34 @@ class ModManager(QWidget):
             if self.selected_category in self.tabs:
                 grid = self.tabs[self.selected_category]["grid"]
                 self.arrange_grid(grid)
+            if hasattr(self, "browse_results_data") and self.browse_results_data:
+                self.render_browse_cards()
         except Exception:
             pass
 
     # -------------------- SELECT ITEM --------------------
     def select_item(self,item):
         self.selected_item = item
+        self.detail_character_label.setText(f"{item.get('name', 'Unknown')} - {self.selected_category.capitalize()}")
+        try:
+            self.update_browse_target_label()
+            self.browse_install_btn.setEnabled(self.browse_selected_file is not None and self.selected_item is not None)
+        except Exception:
+            pass
+        self.show_detail_screen()
         self.load_mods()
+
+    def show_detail_screen(self):
+        try:
+            self.content_stack.setCurrentWidget(self.detail_page)
+        except Exception:
+            pass
+
+    def show_overview_screen(self):
+        try:
+            self.content_stack.setCurrentWidget(self.overview_page)
+        except Exception:
+            pass
 
     def add_new_character(self):
         """Add a new character to the game."""
@@ -1423,11 +2718,19 @@ class ModManager(QWidget):
     def clear_mod_list(self):
         self.mod_list_widget.clear()
         self.selected_mod_path = None
+        self.preview_images = []
+        self.preview_index = 0
+        self.preview_label.setText("No preview available")
+        self.preview_label.setPixmap(QPixmap())
+        self.prev_img_btn.setEnabled(False)
+        self.next_img_btn.setEnabled(False)
+        self.reset_ini_editor("Select a mod to load INI values.")
 
     def load_mods(self):
         if self._loading_mods:
             return
         self._loading_mods = True
+        prev_mod_path = self.selected_mod_path  # capture before clear_mod_list resets it
         try:
             self.clear_mod_list()
             if not self.selected_item:
@@ -1435,9 +2738,8 @@ class ModManager(QWidget):
 
             char_folder = os.path.join(
                 settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
-                self.selected_category,
-                self.selected_item["id"]
             )
+            char_folder = build_item_folder_path(char_folder, self.selected_category, self.selected_item["id"])
             
             # Ask to create folder if it doesn't exist
             if not os.path.exists(char_folder):
@@ -1489,6 +2791,30 @@ class ModManager(QWidget):
                 list_item.setFont(font)
                 self.mod_list_widget.addItem(list_item)
 
+            if self.mod_list_widget.count() > 0:
+                restored = False
+                if prev_mod_path:
+                    prev_name = os.path.basename(prev_mod_path)
+                    prev_dir = os.path.dirname(prev_mod_path)
+                    # Also match the toggled variant (DISABLED_ prefix added/removed)
+                    if prev_name.startswith("DISABLED_"):
+                        alt_name = prev_name[len("DISABLED_"):]
+                    else:
+                        alt_name = "DISABLED_" + prev_name
+                    alt_path = os.path.join(prev_dir, alt_name)
+                    for i in range(self.mod_list_widget.count()):
+                        itm = self.mod_list_widget.item(i)
+                        p = itm.data(Qt.ItemDataRole.UserRole) if itm else None
+                        if p and (p == prev_mod_path or p == alt_path):
+                            self.mod_list_widget.setCurrentItem(itm)
+                            self.select_mod(itm)
+                            restored = True
+                            break
+                if not restored:
+                    first_item = self.mod_list_widget.item(0)
+                    self.mod_list_widget.setCurrentItem(first_item)
+                    self.select_mod(first_item)
+
             self.update_mod_counters()
         finally:
             self._loading_mods = False
@@ -1499,8 +2825,8 @@ class ModManager(QWidget):
             self.update_mod_counter(item)
 
     def update_mod_counter(self,item):
-        folder_path = os.path.join(settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
-                                   self.selected_category, item["id"])
+        base_path = settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game])
+        folder_path = build_item_folder_path(base_path, self.selected_category, item.get("id"))
         count = 0
         enabled_count = 0
         if os.path.exists(folder_path):
@@ -1550,6 +2876,7 @@ class ModManager(QWidget):
 
             # Show preview for the selected mod
             self.show_mod_preview(path)
+            self.load_ini_for_mod(path)
 
         except Exception as e:
             print(f"Error selecting mod: {e}")
@@ -1678,11 +3005,230 @@ class ModManager(QWidget):
             return
         folder = os.path.join(
             settings["mod_paths"].get(self.selected_game, default_mod_paths[self.selected_game]),
-            self.selected_category,
-            self.selected_item["id"]
         )
+        folder = build_item_folder_path(folder, self.selected_category, self.selected_item["id"])
         if os.path.exists(folder):
             open_folder(folder)
+
+    def open_selected_mod_folder(self):
+        if self.selected_mod_path and os.path.exists(self.selected_mod_path):
+            open_folder(self.selected_mod_path)
+
+    def reset_ini_editor(self, status_text="Select a mod to load INI values."):
+        self.selected_ini_path = None
+        self.ini_entries = []
+        self.ini_key_list.blockSignals(True)
+        self.ini_key_list.clear()
+        self.ini_key_list.blockSignals(False)
+        self.ini_value_input.clear()
+        self.ini_back_input.clear()
+        self.ini_file_label.setText("INI: No file selected")
+        self.ini_status_label.setText(status_text)
+        self.update_ini_save_button_state()
+
+    def find_first_ini_file(self, mod_folder_path):
+        if not mod_folder_path or not os.path.isdir(mod_folder_path):
+            return None
+        for root, dirs, files in os.walk(mod_folder_path):
+            dirs.sort(key=str.lower)
+            ini_files = sorted([f for f in files if f.lower().endswith(".ini")], key=str.lower)
+            if ini_files:
+                return os.path.join(root, ini_files[0])
+        return None
+
+    def extract_toggle_entries(self, ini_path):
+        """Parse all [Key*] sections from a GIMI INI using raw line scanning.
+        Returns list of dicts: {name, key, back} or (None, error_string) on read failure.
+        """
+        try:
+            try:
+                with open(ini_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                with open(ini_path, "r", encoding="latin-1") as f:
+                    lines = f.readlines()
+        except Exception as e:
+            return None, str(e)
+
+        sections = []
+        current_name = None
+        current_key = None
+        current_back = None
+
+        def _flush():
+            if current_name is not None:
+                sections.append({"name": current_name, "key": current_key, "back": current_back})
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                _flush()
+                section_name = stripped[1:-1]
+                if section_name.lower().startswith("key"):
+                    current_name = section_name
+                    current_key = None
+                    current_back = None
+                else:
+                    current_name = None
+                    current_key = None
+                    current_back = None
+                continue
+            if current_name is None:
+                continue
+            m = re.match(r'^\s*key\s*=\s*(.+)$', stripped, re.IGNORECASE)
+            if m:
+                current_key = m.group(1).strip()
+                continue
+            m = re.match(r'^\s*back\s*=\s*(.+)$', stripped, re.IGNORECASE)
+            if m:
+                current_back = m.group(1).strip()
+
+        _flush()
+        return sections, None
+
+    def load_ini_for_mod(self, mod_folder_path):
+        self.reset_ini_editor("Searching for INI file...")
+        ini_path = self.find_first_ini_file(mod_folder_path)
+        if not ini_path:
+            self.ini_status_label.setText("No INI file found in this mod folder.")
+            self.update_ini_save_button_state()
+            return
+
+        self.selected_ini_path = ini_path
+        self.ini_file_label.setText(f"INI: {ini_path}")
+
+        sections, err = self.extract_toggle_entries(ini_path)
+        if sections is None:
+            self.ini_status_label.setText(f"Failed to read INI: {err}")
+            self.update_ini_save_button_state()
+            return
+
+        # Only keep sections that actually have a key= line
+        self.ini_entries = [s for s in sections if s["key"]]
+
+        self.ini_key_list.blockSignals(True)
+        self.ini_key_list.clear()
+        for entry in self.ini_entries:
+            display = f"{entry['name']}  —  {entry['key']}"
+            if entry["back"]:
+                display += f"  /  back: {entry['back']}"
+            list_item = QListWidgetItem(display)
+            list_item.setData(Qt.ItemDataRole.UserRole, entry["name"])
+            self.ini_key_list.addItem(list_item)
+        self.ini_key_list.blockSignals(False)
+
+        if self.ini_key_list.count() > 0:
+            self.ini_key_list.setCurrentRow(0)
+            self.on_ini_key_changed(0)
+            self.ini_status_label.setText("Edit forward/backward key then click Save.")
+        else:
+            self.ini_value_input.clear()
+            self.ini_back_input.clear()
+            self.ini_status_label.setText("No [Key...] sections with a key binding found in this INI.")
+
+        self.update_ini_save_button_state()
+
+    def on_ini_key_changed(self, index):
+        if index < 0 or index >= len(self.ini_entries):
+            self.ini_value_input.clear()
+            self.ini_back_input.clear()
+            self.update_ini_save_button_state()
+            return
+        entry = self.ini_entries[index]
+        self.ini_value_input.setText(entry["key"] or "")
+        self.ini_back_input.setText(entry["back"] or "")
+        self.update_ini_save_button_state()
+
+    def update_ini_save_button_state(self):
+        has_ini = bool(self.selected_ini_path and os.path.exists(self.selected_ini_path))
+        has_key_choice = self.ini_key_list.count() > 0 and self.ini_key_list.currentRow() >= 0
+        self.ini_save_btn.setEnabled(has_ini and has_key_choice)
+
+    def save_ini_value(self):
+        if not self.selected_ini_path or not os.path.exists(self.selected_ini_path):
+            self.ini_status_label.setText("Cannot save: no INI file selected.")
+            return
+
+        idx = self.ini_key_list.currentRow()
+        if idx < 0 or idx >= len(self.ini_entries):
+            self.ini_status_label.setText("Cannot save: no section selected.")
+            return
+
+        target_section = self.ini_entries[idx]["name"]
+        new_fwd = self.ini_value_input.text().strip()
+        new_back = self.ini_back_input.text().strip()
+
+        if not new_fwd:
+            self.ini_status_label.setText("Cannot save: forward key binding cannot be empty.")
+            return
+
+        try:
+            try:
+                with open(self.selected_ini_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except UnicodeDecodeError:
+                with open(self.selected_ini_path, "r", encoding="latin-1") as f:
+                    lines = f.readlines()
+        except Exception as e:
+            self.ini_status_label.setText(f"Cannot read INI: {e}")
+            return
+
+        in_target = False
+        key_replaced = False
+        back_replaced = False
+        key_line_pos = -1   # index in new_lines where key= was written
+        new_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            # Track section changes
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_target = (stripped[1:-1] == target_section)
+
+            if in_target:
+                # Replace key =
+                m = re.match(r'^(\s*key\s*=\s*)(.*)$', line, re.IGNORECASE)
+                if m and not key_replaced:
+                    new_lines.append(f"{m.group(1)}{new_fwd}\n")
+                    key_replaced = True
+                    key_line_pos = len(new_lines) - 1
+                    continue
+                # Replace or remove back =
+                m = re.match(r'^(\s*back\s*=\s*)(.*)$', line, re.IGNORECASE)
+                if m:
+                    if new_back:
+                        new_lines.append(f"{m.group(1)}{new_back}\n")
+                        back_replaced = True
+                    # else: skip line entirely (removes back=)
+                    continue
+
+            new_lines.append(line)
+
+        # Insert back= after key= if it didn't exist before but user typed one
+        if new_back and not back_replaced and key_line_pos >= 0:
+            new_lines.insert(key_line_pos + 1, f"back = {new_back}\n")
+
+        if not key_replaced:
+            self.ini_status_label.setText(f"Could not find 'key =' in [{target_section}].")
+            return
+
+        try:
+            with open(self.selected_ini_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            msg = f"Saved [{target_section}]  key = {new_fwd}"
+            if new_back:
+                msg += f"  /  back = {new_back}"
+            elif self.ini_entries[idx]["back"] and not new_back:
+                msg += "  (back removed)"
+            self.ini_status_label.setText(msg)
+            self.load_ini_for_mod(self.selected_mod_path)
+            for i, entry in enumerate(self.ini_entries):
+                if entry["name"] == target_section:
+                    self.ini_key_list.setCurrentRow(i)
+                    self.on_ini_key_changed(i)
+                    break
+        except Exception as e:
+            self.ini_status_label.setText(f"Save failed: {e}")
 
     # -------------------- THEME --------------------
     def on_theme_changed(self, theme_name):
@@ -2372,6 +3918,7 @@ class ModManager(QWidget):
                 settings["last_release_tag"] = tag
                 save_settings()
                 QTimer.singleShot(0, lambda: self.set_update_status(True, f"Update available ({tag})"))
+                QTimer.singleShot(0, lambda t=tag: self.prompt_update_now(t))
             else:
                 # no update
                 settings["last_release_tag"] = tag
@@ -2380,6 +3927,30 @@ class ModManager(QWidget):
         except Exception as e:
             print(f"Error in update check: {e}")
             QTimer.singleShot(0, lambda: self.set_update_status(False, "Error checking"))
+
+    def prompt_update_now(self, tag):
+        """Ask user whether to update now when a newer release is available."""
+        if not tag:
+            return
+        if self.update_prompt_open:
+            return
+        if self.update_prompt_shown_for_tag == tag:
+            return
+
+        self.update_prompt_open = True
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Update Available",
+                f"A newer version ({tag}) is available.\n\nDownload and install it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            self.update_prompt_shown_for_tag = tag
+            if reply == QMessageBox.StandardButton.Yes:
+                self.launch_update_modmanager()
+        finally:
+            self.update_prompt_open = False
 
     def set_update_status(self, available: bool, label_text: str):
         # must call from main thread — use QTimer.singleShot to schedule
@@ -2451,14 +4022,16 @@ class ModManager(QWidget):
             threading.Thread(target=self._download_update_exe_and_launch, daemon=True).start()
             return
 
+        updater_args = [exe_to_run, "--updater", "--install-dir", BASE_DIR]
+
         # Launch the updater and quit modmanager
         try:
             # spawn updater as detached process
             if sys.platform == "win32":
                 # On Windows, CREATE_NEW_CONSOLE/DETACHED_PROCESS could be used; simpler: Popen with shell=False
-                subprocess.Popen([exe_to_run], close_fds=True)
+                subprocess.Popen(updater_args, close_fds=True)
             else:
-                subprocess.Popen([exe_to_run], close_fds=True)
+                subprocess.Popen(updater_args, close_fds=True)
         except Exception as e:
             print("Failed to start updater:", e)
             return
@@ -2491,7 +4064,7 @@ class ModManager(QWidget):
 
         # Launch the new updater and exit
         try:
-            subprocess.Popen([target], close_fds=True)
+            subprocess.Popen([target, "--updater", "--install-dir", BASE_DIR], close_fds=True)
         except Exception as e:
             print("Failed to start downloaded updater:", e)
             return
