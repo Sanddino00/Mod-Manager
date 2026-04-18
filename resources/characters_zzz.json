@@ -1,65 +1,294 @@
 [
- {"id": "alicethymefield", "name": "Alice Thymefield"},
- {"id": "anby", "name": "Anby"},
- {"id": "anby_ss", "name": "Anby_SS"},
- {"id": "anton", "name": "Anton"},
- {"id": "aria", "name": "Aria"},
- {"id": "astra", "name": "Astra"},
- {"id": "banyue", "name": "Banyue"},
- {"id": "belle", "name": "Belle"},
- {"id": "ben", "name": "Ben"},
- {"id": "billy", "name": "Billy"},
- {"id": "burnice", "name": "Burnice"},
- {"id": "caesar", "name": "Caesar"},
- {"id": "corin", "name": "Corin"},
- {"id": "dialyn", "name": "Dialyn"},
- {"id": "ellen", "name": "Ellen"},
- {"id": "evelyn", "name": "Evelyn"},
- {"id": "grace", "name": "Grace"},
- {"id": "harumasa", "name": "Harumasa"},
- {"id": "hugo", "name": "Hugo"},
- {"id": "jane", "name": "Jane"},
- {"id": "jufufu", "name": "JuFufu"},
- {"id": "koleda", "name": "Koleda"},
- {"id": "lighter", "name": "Lighter"},
- {"id": "lucy", "name": "Lucy"},
- {"id": "lycaon", "name": "Lycaon"},
- {"id": "manato", "name": "Manato"},
- {"id": "miyabi", "name": "Miyabi"},
- {"id": "nekomata", "name": "Nekomata"},
- {"id": "nicole", "name": "Nicole"},
- {"id": "orphie", "name": "OrphieMagnusson"},
- {"id": "panyinhu", "name": "PanYinhu"},
- {"id": "piper", "name": "Piper"},
- {"id": "pulchra", "name": "Pulchra"},
- {"id": "qingyi", "name": "Qingyi"},
- {"id": "rina", "name": "Rina"},
- {"id": "seed", "name": "Seed"},
- {"id": "seth", "name": "Seth"},
- {"id": "soldier11", "name": "Soldier11"},
- {"id": "soukaku", "name": "Soukaku"},
- {"id": "sunna", "name": "Sunna"},
- {"id": "trigger", "name": "Trigger"},
- {"id": "ukinamiyuzuha", "name": "Ukinami Yuzuha"},
- {"id": "vivian", "name": "Vivian"},
- {"id": "wise", "name": "Wise"},
- {"id": "yanagi", "name": "Yanagi"},
- {"id": "yeshunguang", "name": "Ye Shunguang"},
- {"id": "yidhari", "name": "Yidhari"},
- {"id": "yixuan", "name": "Yixuan"},
- {"id": "zhao", "name": "Zhao"},
- {"id": "zhuyuan", "name": "ZhuYuan"},
-
-
- {"id": "character_skin_nicole_cunning_cutie", "name": "Character Skin Nicole Cunning Cutie"},
- {"id": "character_skin_alice_sea_of_thyme", "name": "Character Skin Alice Sea Of Thyme"},
- {"id": "character_skin_astra_chandelier", "name": "Character Skin Astra Chandelier"},
- {"id": "character_skin_belle_delicate_sunlight", "name": "Character Skin Belle Delicate Sunlight"},
- {"id": "character_skin_belle_summer_skies", "name": "Character Skin Belle Summer Skies"},
- {"id": "character_skin_ellen_on_campus", "name": "Character Skin Ellen On Campus"},
- {"id": "character_skin_wise_peaceful_waves", "name": "Character Skin Wise Peaceful Waves"},
- {"id": "character_skin_wise_soaring_crane", "name": "Character Skin Wise Soaring Crane"},
- {"id": "character_skin_yixuan_trails_of_ink", "name": "Character Skin Yixuan Trails of Ink"},
- {"id": "character_skin_yuzuha_tanuki_in_broad_daylight", "name": "Character Skin Yuzuha Tanuki In Broad Daylight"},
- {"id": "TouchofDawnlight", "name": "Touch of Dawnlight"}
+  {
+    "id": "alicethymefield",
+    "name": "Alice Thymefield"
+  },
+  {
+    "id": "anby",
+    "name": "Anby"
+  },
+  {
+    "id": "anby_ss",
+    "name": "Anby_SS"
+  },
+  {
+    "id": "anton",
+    "name": "Anton"
+  },
+  {
+    "id": "aria",
+    "name": "Aria"
+  },
+  {
+    "id": "astra",
+    "name": "Astra"
+  },
+  {
+    "id": "banyue",
+    "name": "Banyue"
+  },
+  {
+    "id": "belle",
+    "name": "Belle"
+  },
+  {
+    "id": "ben",
+    "name": "Ben"
+  },
+  {
+    "id": "billy",
+    "name": "Billy"
+  },
+  {
+    "id": "burnice",
+    "name": "Burnice"
+  },
+  {
+    "id": "caesar",
+    "name": "Caesar"
+  },
+  {
+    "id": "corin",
+    "name": "Corin"
+  },
+  {
+    "id": "dialyn",
+    "name": "Dialyn"
+  },
+  {
+    "id": "ellen",
+    "name": "Ellen"
+  },
+  {
+    "id": "evelyn",
+    "name": "Evelyn"
+  },
+  {
+    "id": "grace",
+    "name": "Grace"
+  },
+  {
+    "id": "harumasa",
+    "name": "Harumasa"
+  },
+  {
+    "id": "jane",
+    "name": "Jane"
+  },
+  {
+    "id": "jufufu",
+    "name": "JuFufu"
+  },
+  {
+    "id": "koleda",
+    "name": "Koleda"
+  },
+  {
+    "id": "lighter",
+    "name": "Lighter"
+  },
+  {
+    "id": "lucy",
+    "name": "Lucy"
+  },
+  {
+    "id": "lycaon",
+    "name": "Lycaon"
+  },
+  {
+    "id": "manato",
+    "name": "Manato"
+  },
+  {
+    "id": "miyabi",
+    "name": "Miyabi"
+  },
+  {
+    "id": "nekomata",
+    "name": "Nekomata"
+  },
+  {
+    "id": "orphie",
+    "name": "OrphieMagnusson"
+  },
+  {
+    "id": "panyinhu",
+    "name": "PanYinhu"
+  },
+  {
+    "id": "pulchra",
+    "name": "Pulchra"
+  },
+  {
+    "id": "qingyi",
+    "name": "Qingyi"
+  },
+  {
+    "id": "rina",
+    "name": "Rina"
+  },
+  {
+    "id": "seed",
+    "name": "Seed"
+  },
+  {
+    "id": "seth",
+    "name": "Seth"
+  },
+  {
+    "id": "soldier11",
+    "name": "Soldier11"
+  },
+  {
+    "id": "soukaku",
+    "name": "Soukaku"
+  },
+  {
+    "id": "sunna",
+    "name": "Sunna"
+  },
+  {
+    "id": "trigger",
+    "name": "Trigger"
+  },
+  {
+    "id": "ukinamiyuzuha",
+    "name": "Ukinami Yuzuha"
+  },
+  {
+    "id": "wise",
+    "name": "Wise"
+  },
+  {
+    "id": "yanagi",
+    "name": "Yanagi"
+  },
+  {
+    "id": "yeshunguang",
+    "name": "Ye Shunguang"
+  },
+  {
+    "id": "yixuan",
+    "name": "Yixuan"
+  },
+  {
+    "id": "zhao",
+    "name": "Zhao"
+  },
+  {
+    "id": "zhuyuan",
+    "name": "ZhuYuan"
+  },
+  {
+    "id": "character_skin_nicole_cunning_cutie",
+    "name": "Character Skin Nicole Cunning Cutie"
+  },
+  {
+    "id": "character_skin_alice_sea_of_thyme",
+    "name": "Character Skin Alice Sea Of Thyme"
+  },
+  {
+    "id": "character_skin_astra_chandelier",
+    "name": "Character Skin Astra Chandelier"
+  },
+  {
+    "id": "character_skin_belle_delicate_sunlight",
+    "name": "Character Skin Belle Delicate Sunlight"
+  },
+  {
+    "id": "character_skin_belle_summer_skies",
+    "name": "Character Skin Belle Summer Skies"
+  },
+  {
+    "id": "character_skin_ellen_on_campus",
+    "name": "Character Skin Ellen On Campus"
+  },
+  {
+    "id": "character_skin_wise_peaceful_waves",
+    "name": "Character Skin Wise Peaceful Waves"
+  },
+  {
+    "id": "character_skin_wise_soaring_crane",
+    "name": "Character Skin Wise Soaring Crane"
+  },
+  {
+    "id": "character_skin_yixuan_trails_of_ink",
+    "name": "Character Skin Yixuan Trails of Ink"
+  },
+  {
+    "id": "character_skin_yuzuha_tanuki_in_broad_daylight",
+    "name": "Character Skin Yuzuha Tanuki In Broad Daylight"
+  },
+  {
+    "id": "TouchofDawnlight",
+    "name": "Touch of Dawnlight"
+  },
+  {
+    "id": "afternoon_tea_break",
+    "name": "Afternoon Tea Break"
+  },
+  {
+    "id": "cissia",
+    "name": "Cissia"
+  },
+  {
+    "id": "culinary_jewel",
+    "name": "Culinary Jewel"
+  },
+  {
+    "id": "discordant_note",
+    "name": "Discordant Note"
+  },
+  {
+    "id": "hugo_vlad",
+    "name": "Hugo Vlad"
+  },
+  {
+    "id": "iris_of_the_shore",
+    "name": "Iris of the Shore"
+  },
+  {
+    "id": "lucia_elowen",
+    "name": "Lucia Elowen"
+  },
+  {
+    "id": "nangong_yu",
+    "name": "Nangong Yu"
+  },
+  {
+    "id": "nicole_demara",
+    "name": "Nicole Demara"
+  },
+  {
+    "id": "nocturne_of_light",
+    "name": "Nocturne of Light"
+  },
+  {
+    "id": "piper_wheel",
+    "name": "Piper Wheel"
+  },
+  {
+    "id": "promeia",
+    "name": "Promeia"
+  },
+  {
+    "id": "rhapsody_s_muse",
+    "name": "Rhapsody's Muse"
+  },
+  {
+    "id": "starlight_billy",
+    "name": "Starlight - Billy"
+  },
+  {
+    "id": "vivian_banshee",
+    "name": "Vivian Banshee"
+  },
+  {
+    "id": "white_heart_silhouette",
+    "name": "White Heart Silhouette"
+  },
+  {
+    "id": "yidhari_murphy",
+    "name": "Yidhari Murphy"
+  }
 ]
