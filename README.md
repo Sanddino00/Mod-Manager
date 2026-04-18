@@ -60,6 +60,18 @@ Dropdownmenu for selecting a game
 3 color palates for the manager
 <img width="202" height="159" alt="Screenshot 2026-04-18 151505" src="https://github.com/user-attachments/assets/a09a5a2c-ead2-4746-9498-b30a45e3dc26" />
 -
+Dark
+-
+<img width="2031" height="1194" alt="Screenshot 2026-04-18 155657" src="https://github.com/user-attachments/assets/84bbdeba-7153-4a96-b65b-1778603fe6ff" />
+
+Light
+-
+<img width="2051" height="1200" alt="Screenshot 2026-04-18 155706" src="https://github.com/user-attachments/assets/6d9957e8-7112-4bfc-9c19-4fc8ad30ace1" />
+
+Game Themed (kinda)
+-
+<img width="2038" height="1190" alt="Screenshot 2026-04-18 155717" src="https://github.com/user-attachments/assets/8dd50b2f-914b-4efa-9bab-e5c9a826f919" />
+
 
 ------------------------------------------------
 
