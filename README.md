@@ -2,7 +2,7 @@
 This is a small mod manager which uses a structured folder system to organize your mods. The folder structure is similar to the JASM Modmanager. 
 -
 
-This mod manager also comes with a manager for the character/mod fixes, the funktion to run them via the mod manager and an inapp gamebanana brows and download feature. I provided the links to the downloadpages for the tool in case you don't know how to use them but most are just click and run. 
+This mod manager also comes with a manager for the mod fixes, the funktion to run them via the mod manager and an inapp gamebanana browser and download feature. I provided the links to the downloadpages for the tool in case you don't know how to use them but most are just click and run. 
 You need python installed to run the scripts, either download the portable version or full version from the offical side.
 ------------------------------------------------
 
