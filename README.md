@@ -1,20 +1,19 @@
 ------------------------------------------------
 This is a small mod manager which uses a structured folder system to organize your mods. The folder structure is similar to the JASM Modmanager. 
-
-Supported Games: Genshin, Star Rail, Wuwa, ZZZ and Endfield
+-
 
 This mod manager also comes with a manager for the character/mod fixes, the funktion to run them via the mod manager and an inapp gamebanana brows and download feature. I provided the links to the downloadpages for the tool in case you don't know how to use them but most are just click and run. 
 You need python installed to run the scripts, either download the portable version or full version from the offical side.
 ------------------------------------------------
 
 Installation:
-
+-
 The updater/installer is simple and shouldn't need much explaining. Select a folder for installation and if you want a shortcut or not
 <img width="499" height="329" alt="Screenshot 2026-04-18 151048" src="https://github.com/user-attachments/assets/497f1a57-10b7-4a6f-b7b8-5ea378b832bf" />
-------------------------------------------------
+-
 It will ask you to create a folder for the characters. Click no since the folder will be created inside the installation folder instead of the mod folder.
 <img width="290" height="157" alt="Screenshot 2026-04-18 151132" src="https://github.com/user-attachments/assets/36aca332-07d2-495d-9ffa-3978f573d714" />
-------------------------------------------------
+-
 From the main page go to settings and select the location of the mod folder for the game/s you want to manage.
 <img width="2045" height="1201" alt="Screenshot 2026-04-18 151201" src="https://github.com/user-attachments/assets/40f6f52c-c415-457b-9f2f-0083c8d43fb8" />
 <img width="2025" height="1107" alt="Screenshot 2026-04-18 151524" src="https://github.com/user-attachments/assets/2107936c-b7f5-4e08-a6a2-50a7757f6e9f" />
