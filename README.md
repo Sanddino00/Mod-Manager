@@ -1,3 +1,4 @@
+------------------------------------------------
 This is a small mod manager which uses a structured folder system to organize your mods. The folder structure is similar to the JASM Modmanager. 
 
 Supported Games: Genshin, Star Rail, Wuwa, ZZZ and Endfield
@@ -40,7 +41,7 @@ In app gamebanana brwoser and downloader for each game. Also downloads a preview
 Fix Tool Manager:
 <img width="2042" height="1194" alt="Screenshot 2026-04-18 151457" src="https://github.com/user-attachments/assets/71f3d15e-5325-4ba6-b43a-7f994ab55a85" />
 
-Enable/Disable mods with one click. Check the box if you want to enable the one click dis-/enableing
+Enable/Disable mods with one click. You can enable this in the settings tab
 <img width="2025" height="1107" alt="Screenshot 2026-04-18 151524" src="https://github.com/user-attachments/assets/4fe55bad-2403-44f7-a6fe-68ecfdb29e9b" />
 
 Button to open main page of gamebanana for the selected game
@@ -54,7 +55,7 @@ Dedicated folder chreation for characters, weapons, ui mod, object mods and npc 
 
 Extra stuff:
 
-Remembers last selected path per game for the Fixmanager and defaults to the mod folder if non is chosen.
+Remembers last selected path per game for the Fixmanager and defaults to the mod folder of that game if non is selected.
 
 Dropdownmenu for selecting a game
 <img width="140" height="197" alt="Screenshot 2026-04-18 151245" src="https://github.com/user-attachments/assets/4ae8b7b8-06a1-4573-922c-31da85360128" />
