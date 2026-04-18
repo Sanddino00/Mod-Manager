@@ -31,6 +31,10 @@ Cross game search funktion and ability to favorite characters and other mods
 Toggle key editor and preview ability. Add your own images as preview
 <img width="2053" height="1196" alt="Screenshot 2026-04-18 151335" src="https://github.com/user-attachments/assets/65843d20-a461-43eb-b111-77a4e60903d1" />
 -
+Drag and Drop. Simply drag and drop the mod into the mod list (Don't run the manager as admin because drag and drop breaks if file explorer and the manager aren't both run as non admin or admin)
+<img width="983" height="1169" alt="Screenshot 2026-04-18 160254" src="https://github.com/user-attachments/assets/6d5010bf-51b7-469a-a352-7329ce4e745d" />
+-
+
 In app gamebanana brwoser and downloader for each game. Also downloads a preview for the mod right into the mods folder.
 <img width="2039" height="1197" alt="Screenshot 2026-04-18 151314" src="https://github.com/user-attachments/assets/01f6a496-0013-4fef-a759-e0bba0b6a924" />
 -
