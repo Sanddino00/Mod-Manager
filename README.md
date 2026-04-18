@@ -89,5 +89,7 @@ Also feel free modify the mod manager in any way you like. ---------------------
 <img width="415" height="334" alt="image" src="https://github.com/user-attachments/assets/5edde990-b988-4cce-849e-387951a6f305" />
 
 To do list:
+-
 - Fixing the auto update funktion
 - reworking the folder creation due to it creating folders inside the installation folder
+- Fixing the false not responding message of the installer/updater
