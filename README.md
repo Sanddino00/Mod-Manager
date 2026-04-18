@@ -1,70 +1,67 @@
 This is a small mod manager which uses a structured folder system to organize your mods. The folder structure is similar to the JASM Modmanager. 
 
-Supported Games: Genshin, Star Rail, Wuwa and ZZZ
+Supported Games: Genshin, Star Rail, Wuwa, ZZZ and Endfield
 
-This mod manager also comes with a manager for the character/mod fixes and the funktion to run them via the mod manager. I provided the links to the downloadpages for the tool in case you don't know how to use them but most are just click and run. 
-You need python to run the scripts either download the portable version from the release page or get it from the offical side.
-
-This modmanager allows you to either enable or disable mods with right click or the seperate button above the mod list. It dis-/enables mods by renaming the individual mod folder to DISABLED_Modname to disable and removes the DISABLED_ to reanable the mod
-
-<img width="2632" height="1259" alt="image" src="https://github.com/user-attachments/assets/e483706c-1789-4ba2-b436-b5c5d239f95b" />
-There are six sections for each game to make the mod folder more structured (character, weapons, ui, objects, npcs and fixes) 
-Note fixes are stored inside the resources folder of the mod manager  
------------------------------------------
-<img width="129" height="485" alt="image" src="https://github.com/user-attachments/assets/49c5c117-dcff-4a32-93da-a04897bee235" />
-<img width="816" height="297" alt="image" src="https://github.com/user-attachments/assets/a8cb0c01-0f74-4c1f-b577-aabddfb97696" />
-
-
-Features:
-
-1. Multi game support 
-<img width="1145" height="310" alt="image" src="https://github.com/user-attachments/assets/0429a278-088b-4cc7-9c54-3c090e46dff1" />
-<img width="284" height="66" alt="image" src="https://github.com/user-attachments/assets/5169065c-fe6f-4081-b9a1-4b502f346eb1" />
-
-Simple dropdown menu to select the game and a button linking to the gamebanana pange of the selected game.
-
+This mod manager also comes with a manager for the character/mod fixes, the funktion to run them via the mod manager and an inapp gamebanana brows and download feature. I provided the links to the downloadpages for the tool in case you don't know how to use them but most are just click and run. 
+You need python installed to run the scripts, either download the portable version or full version from the offical side.
 ------------------------------------------------
 
-2. Pin funktion to pin favourite characters and mod counter 
-<img width="251" height="245" alt="image" src="https://github.com/user-attachments/assets/f19ae74c-db87-43e3-b746-790e0546c004" />
-<img width="170" height="249" alt="image" src="https://github.com/user-attachments/assets/d74e85df-1c5d-46cf-8c9e-b371dc6490c8" />
+Installation:
 
-To pin a character click the little star.
-
+The updater/installer is simple and shouldn't need much explaining. Select a folder for installation and if you want a shortcut or not
+<img width="499" height="329" alt="Screenshot 2026-04-18 151048" src="https://github.com/user-attachments/assets/497f1a57-10b7-4a6f-b7b8-5ea378b832bf" />
+------------------------------------------------
+It will ask you to create a folder for the characters. Click no since the folder will be created inside the installation folder instead of the mod folder.
+<img width="290" height="157" alt="Screenshot 2026-04-18 151132" src="https://github.com/user-attachments/assets/36aca332-07d2-495d-9ffa-3978f573d714" />
+------------------------------------------------
+From the main page go to settings and select the location of the mod folder for the game/s you want to manage.
+<img width="2045" height="1201" alt="Screenshot 2026-04-18 151201" src="https://github.com/user-attachments/assets/40f6f52c-c415-457b-9f2f-0083c8d43fb8" />
+<img width="2025" height="1107" alt="Screenshot 2026-04-18 151524" src="https://github.com/user-attachments/assets/2107936c-b7f5-4e08-a6a2-50a7757f6e9f" />
+------------------------------------------------
 ------------------------------------------------
 
-3.Auto preview funktion 
-
-<img width="642" height="419" alt="image" src="https://github.com/user-attachments/assets/e54bcc87-d7fd-4d4a-846d-354b2b26aabc" />
-
-Searches for png,jpeg, jpg and web files in the individual mod folders as preview wich the option to add multiple pictures and scroll through them 
+Supported games:
+<img width="140" height="197" alt="Screenshot 2026-04-18 151245" src="https://github.com/user-attachments/assets/3a98c74e-67be-4499-96da-ad409865a571" />
 
 ------------------------------------------------
-
-4. Search bar with cross game search 
-<img width="1904" height="264" alt="image" src="https://github.com/user-attachments/assets/cf646b3a-8e4e-4b71-9ec3-6fe24a203490" />
-
 ------------------------------------------------
 
-5. Character add button to add custom characters or missing characters / skins
-<img width="1113" height="621" alt="image" src="https://github.com/user-attachments/assets/4a6d71da-2a74-42a5-9791-dc0e660cb4f5" />
+Features: 
+
+Cross game search funktion and ability to favorite characters and other mods
+<img width="2045" height="1201" alt="search and fav" src="https://github.com/user-attachments/assets/76978418-0c17-4b2d-85bd-b17c2bb857c0" />
+
+Toggle key editor and preview ability. Add your own images as preview
+<img width="2053" height="1196" alt="Screenshot 2026-04-18 151335" src="https://github.com/user-attachments/assets/65843d20-a461-43eb-b111-77a4e60903d1" />
+
+In app gamebanana brwoser and downloader for each game. Also downloads a preview for the mod right into the mods folder.
+<img width="2039" height="1197" alt="Screenshot 2026-04-18 151314" src="https://github.com/user-attachments/assets/01f6a496-0013-4fef-a759-e0bba0b6a924" />
+
+Fix Tool Manager:
+<img width="2042" height="1194" alt="Screenshot 2026-04-18 151457" src="https://github.com/user-attachments/assets/71f3d15e-5325-4ba6-b43a-7f994ab55a85" />
+
+Enable/Disable mods with one click. Check the box if you want to enable the one click dis-/enableing
+<img width="2025" height="1107" alt="Screenshot 2026-04-18 151524" src="https://github.com/user-attachments/assets/4fe55bad-2403-44f7-a6fe-68ecfdb29e9b" />
+
+Button to open main page of gamebanana for the selected game
+<img width="2045" height="1201" alt="gamebanana link" src="https://github.com/user-attachments/assets/b4debe43-b328-484f-b495-55bb262c40fa" />
+
+Dedicated folder chreation for characters, weapons, ui mod, object mods and npc mods as well as a buffer value folder tab
+<img width="2031" height="1189" alt="Screenshot 2026-04-18 151412" src="https://github.com/user-attachments/assets/3c2963b3-0f0f-4fa8-90b1-3960648be797" />
 
 ------------------------------------------------
-
-6. Modlist 
-<img width="646" height="613" alt="image" src="https://github.com/user-attachments/assets/c1376b53-4206-4c19-b99a-81ab3b6e7943" />
-
-Clearly labeling DISABLED mods and live refreshing list
-
 ------------------------------------------------
 
-7. Fix tool manager / applier
-<img width="1263" height="953" alt="image" src="https://github.com/user-attachments/assets/dec9076e-a6f6-4d89-91ec-6aa1361ed07b" />
-To use a fix tool select a folder, select a fix tool and press run fix. It opens a terminal window to use the py scripts / being used as output for the exe versions and to answer prompts
-The fix section also includes a download button which links to the gamebanana side of rabbitfx which many/most mods in wuwa and zzz need.
-<img width="1168" height="815" alt="image" src="https://github.com/user-attachments/assets/e1770981-9f53-4c67-bece-230048bdcd90" />
-It will only show fixes related to the selected game. It runs the fixes by copying them to the selected folder, running the selected fix and then deleting the copy of the fix. 
-(Note I do not own almost any of the fixes I only made the facefix and the orfix for complex mods. Please support the creators of these wonderful tools if you can)
+Extra stuff:
+
+Remembers last selected path per game for the Fixmanager and defaults to the mod folder if non is chosen.
+
+Dropdownmenu for selecting a game
+<img width="140" height="197" alt="Screenshot 2026-04-18 151245" src="https://github.com/user-attachments/assets/4ae8b7b8-06a1-4573-922c-31da85360128" />
+
+3 color palates for the manager
+<img width="202" height="159" alt="Screenshot 2026-04-18 151505" src="https://github.com/user-attachments/assets/a09a5a2c-ead2-4746-9498-b30a45e3dc26" />
+
 
 ------------------------------------------------
 
@@ -72,12 +69,11 @@ If something is unclear or if  I forgot anything please let me know.
 
 ------------------------------------------------
 
-If you have questions, have any suggestions or want me to remove something you created (fixes) dm me on discord on one of my two accounts. 
+If you have questions, have any suggestions or want me to remove something you created (e.g. fixes) dm me on discord on one of my two accounts. 
 Also feel free modify the mod manager in any way you like. --------------------------------
 <img width="421" height="353" alt="image" src="https://github.com/user-attachments/assets/619fe544-8b59-4249-ab43-6ace56fd1b24" />
 <img width="415" height="334" alt="image" src="https://github.com/user-attachments/assets/5edde990-b988-4cce-849e-387951a6f305" />
 
 To do list:
 - Fixing the auto update funktion
-- adding Endfield support
-- Adding missing Character and Icons
+- reworking the folder creation due to it creating folders inside the installation folder
