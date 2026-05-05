@@ -58,31 +58,65 @@ type GameThemeSkin = {
   panel: string;
 };
 
+type GameCardIdentity = {
+  tagline: string;
+  overlay: string;
+  badge: string;
+};
+
 const GAME_THEME_SKINS: Record<GameKey, GameThemeSkin> = {
   gi: {
-    shell: "min-h-screen bg-[radial-gradient(circle_at_14%_10%,_rgba(56,189,248,0.24),_transparent_26%),radial-gradient(circle_at_84%_16%,_rgba(147,197,253,0.18),_transparent_28%),radial-gradient(circle_at_30%_88%,_rgba(110,231,183,0.16),_transparent_30%),linear-gradient(180deg,_#071023_0%,_#0f1e3a_52%,_#090f1f_100%)] text-slate-100",
-    shellPanel: "border border-cyan-300/20 bg-slate-950/38 shadow-[0_28px_120px_rgba(3,8,22,0.52)] backdrop-blur-md",
-    panel: "border border-cyan-300/15 bg-slate-950/48 shadow-[0_22px_80px_rgba(4,7,22,0.34)]",
+    shell: "min-h-screen bg-[radial-gradient(circle_at_16%_10%,_rgba(219,234,254,0.22),_transparent_26%),radial-gradient(circle_at_84%_12%,_rgba(252,211,77,0.2),_transparent_28%),radial-gradient(circle_at_26%_84%,_rgba(243,244,246,0.16),_transparent_34%),linear-gradient(180deg,_#1c1f29_0%,_#3b3a37_38%,_#5f5c57_64%,_#2a2d39_100%)] text-slate-100",
+    shellPanel: "border border-sky-100/24 bg-stone-800/34 shadow-[0_28px_120px_rgba(18,24,38,0.48)] backdrop-blur-md",
+    panel: "border border-amber-100/18 bg-stone-900/42 shadow-[0_22px_80px_rgba(14,18,30,0.36)]",
   },
   hsr: {
-    shell: "min-h-screen bg-[radial-gradient(circle_at_12%_12%,_rgba(250,204,21,0.24),_transparent_24%),radial-gradient(circle_at_84%_14%,_rgba(251,191,36,0.2),_transparent_28%),radial-gradient(circle_at_24%_84%,_rgba(96,165,250,0.14),_transparent_30%),linear-gradient(180deg,_#141125_0%,_#2b1d47_52%,_#151126_100%)] text-slate-100",
-    shellPanel: "border border-amber-300/20 bg-indigo-950/34 shadow-[0_30px_120px_rgba(16,11,32,0.54)] backdrop-blur-md",
-    panel: "border border-amber-300/15 bg-indigo-950/44 shadow-[0_22px_80px_rgba(12,8,26,0.36)]",
+    shell: "min-h-screen bg-[radial-gradient(circle_at_14%_10%,_rgba(147,197,253,0.22),_transparent_24%),radial-gradient(circle_at_82%_14%,_rgba(244,208,63,0.18),_transparent_28%),radial-gradient(circle_at_24%_86%,_rgba(167,139,250,0.15),_transparent_30%),linear-gradient(180deg,_#0d1120_0%,_#1a2548_46%,_#221539_72%,_#0d1020_100%)] text-slate-100",
+    shellPanel: "border border-blue-200/20 bg-indigo-950/28 shadow-[0_30px_120px_rgba(10,12,34,0.56)] backdrop-blur-md",
+    panel: "border border-blue-200/13 bg-indigo-950/38 shadow-[0_22px_80px_rgba(12,10,34,0.38)]",
   },
   wuwa: {
-    shell: "min-h-screen bg-[radial-gradient(circle_at_10%_12%,_rgba(16,185,129,0.24),_transparent_25%),radial-gradient(circle_at_86%_14%,_rgba(34,197,94,0.2),_transparent_28%),radial-gradient(circle_at_22%_86%,_rgba(45,212,191,0.14),_transparent_30%),linear-gradient(180deg,_#04130f_0%,_#0c2a22_52%,_#071610_100%)] text-slate-100",
-    shellPanel: "border border-emerald-300/20 bg-emerald-950/34 shadow-[0_28px_110px_rgba(2,20,16,0.54)] backdrop-blur-md",
-    panel: "border border-emerald-300/16 bg-emerald-950/44 shadow-[0_22px_80px_rgba(3,16,12,0.36)]",
+    shell: "min-h-screen bg-[radial-gradient(circle_at_12%_12%,_rgba(226,232,240,0.16),_transparent_24%),radial-gradient(circle_at_84%_16%,_rgba(20,184,166,0.18),_transparent_28%),radial-gradient(circle_at_24%_84%,_rgba(148,163,184,0.14),_transparent_30%),linear-gradient(180deg,_#06090f_0%,_#101923_46%,_#15242c_70%,_#070a10_100%)] text-slate-100",
+    shellPanel: "border border-teal-200/18 bg-slate-950/34 shadow-[0_28px_110px_rgba(4,10,16,0.58)] backdrop-blur-md",
+    panel: "border border-teal-200/12 bg-slate-950/44 shadow-[0_22px_80px_rgba(4,10,18,0.4)]",
   },
   zzz: {
-    shell: "min-h-screen bg-[radial-gradient(circle_at_12%_10%,_rgba(251,146,60,0.22),_transparent_24%),radial-gradient(circle_at_84%_12%,_rgba(248,113,113,0.2),_transparent_28%),radial-gradient(circle_at_30%_88%,_rgba(125,211,252,0.14),_transparent_30%),linear-gradient(180deg,_#190f11_0%,_#31161a_52%,_#170d0f_100%)] text-slate-100",
-    shellPanel: "border border-orange-300/20 bg-rose-950/32 shadow-[0_28px_110px_rgba(24,9,12,0.52)] backdrop-blur-md",
-    panel: "border border-orange-300/16 bg-rose-950/42 shadow-[0_22px_80px_rgba(20,8,10,0.34)]",
+    shell: "min-h-screen bg-[radial-gradient(circle_at_10%_10%,_rgba(251,191,36,0.2),_transparent_22%),radial-gradient(circle_at_84%_12%,_rgba(249,115,22,0.2),_transparent_26%),radial-gradient(circle_at_24%_82%,_rgba(239,68,68,0.16),_transparent_28%),linear-gradient(180deg,_#16110d_0%,_#2a1b12_38%,_#111827_64%,_#0a0d14_100%)] text-slate-100",
+    shellPanel: "border border-amber-200/18 bg-stone-950/34 shadow-[0_28px_110px_rgba(22,12,8,0.56)] backdrop-blur-md",
+    panel: "border border-orange-200/14 bg-stone-950/44 shadow-[0_22px_80px_rgba(18,10,10,0.38)]",
   },
   end: {
-    shell: "min-h-screen bg-[radial-gradient(circle_at_10%_10%,_rgba(192,132,252,0.22),_transparent_24%),radial-gradient(circle_at_84%_12%,_rgba(129,140,248,0.2),_transparent_28%),radial-gradient(circle_at_22%_84%,_rgba(103,232,249,0.14),_transparent_30%),linear-gradient(180deg,_#120f1f_0%,_#241a3c_52%,_#130f22_100%)] text-slate-100",
-    shellPanel: "border border-violet-300/20 bg-violet-950/34 shadow-[0_28px_110px_rgba(14,10,26,0.52)] backdrop-blur-md",
-    panel: "border border-violet-300/16 bg-violet-950/44 shadow-[0_22px_80px_rgba(12,8,22,0.34)]",
+    shell: "min-h-screen bg-[radial-gradient(circle_at_12%_12%,_rgba(163,230,53,0.24),_transparent_24%),radial-gradient(circle_at_82%_14%,_rgba(52,211,153,0.18),_transparent_28%),radial-gradient(circle_at_22%_84%,_rgba(187,247,208,0.14),_transparent_30%),linear-gradient(180deg,_#05120a_0%,_#0f2b1d_42%,_#1a4430_68%,_#09170f_100%)] text-slate-100",
+    shellPanel: "border border-lime-200/20 bg-emerald-950/28 shadow-[0_28px_110px_rgba(6,22,14,0.56)] backdrop-blur-md",
+    panel: "border border-lime-200/14 bg-emerald-950/38 shadow-[0_22px_80px_rgba(6,18,12,0.4)]",
+  },
+};
+
+const GAME_CARD_IDENTITIES: Record<GameKey, GameCardIdentity> = {
+  gi: {
+    tagline: "Celestial fantasy",
+    overlay: "radial-gradient(circle at 84% 14%, rgba(252, 211, 77, 0.2), transparent 28%), radial-gradient(circle at 18% 82%, rgba(191, 219, 254, 0.2), transparent 34%), linear-gradient(145deg, rgba(243, 244, 246, 0.1), transparent 30%)",
+    badge: "Ivory Sky",
+  },
+  hsr: {
+    tagline: "Astral railcore",
+    overlay: "radial-gradient(circle at 82% 16%, rgba(147, 197, 253, 0.18), transparent 28%), radial-gradient(circle at 18% 82%, rgba(244, 208, 63, 0.14), transparent 34%)",
+    badge: "Astral Blue",
+  },
+  wuwa: {
+    tagline: "Stormfront tactical",
+    overlay: "linear-gradient(140deg, rgba(226, 232, 240, 0.08), transparent 34%), radial-gradient(circle at 78% 18%, rgba(45, 212, 191, 0.14), transparent 30%)",
+    badge: "Steel + Teal",
+  },
+  zzz: {
+    tagline: "Urban impact",
+    overlay: "radial-gradient(circle at 84% 12%, rgba(249, 115, 22, 0.18), transparent 28%), linear-gradient(145deg, rgba(251, 191, 36, 0.1), transparent 30%)",
+    badge: "Signal Amber",
+  },
+  end: {
+    tagline: "Frontier sci-fi",
+    overlay: "radial-gradient(circle at 82% 14%, rgba(163, 230, 53, 0.16), transparent 28%), radial-gradient(circle at 24% 84%, rgba(74, 222, 128, 0.14), transparent 34%)",
+    badge: "Frontier Green",
   },
 };
 
@@ -237,7 +271,6 @@ function App() {
   const [activeGame, setActiveGame] = useState<GameKey | null>(null);
   const [activeCategory, setActiveCategory] = useState<CategoryKey>("characters");
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
-  const [scan, setScan] = useState<GameScanSummary | null>(null);
   const [inventory, setInventory] = useState<GameInventorySummary | null>(null);
   const [itemMods, setItemMods] = useState<ItemModsSummary | null>(null);
   const [modDetails, setModDetails] = useState<ModDetailSummary | null>(null);
@@ -247,6 +280,7 @@ function App() {
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [iconDataUrls, setIconDataUrls] = useState<Record<string, string>>({});
   const [fixesPanel, setFixesPanel] = useState<FixesPanelData | null>(null);
+  const [gameScans, setGameScans] = useState<Partial<Record<GameKey, GameScanSummary>>>({});
   const [error, setError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -320,6 +354,8 @@ function App() {
   useEffect(() => { highlightedGameRef.current = highlightedGame; }, [highlightedGame]);
   const persistedSettingsRef = useRef(persistedSettings);
   useEffect(() => { persistedSettingsRef.current = persistedSettings; }, [persistedSettings]);
+  const legacyInstallBaseDirRef = useRef(state?.legacy_install?.base_dir ?? null);
+  useEffect(() => { legacyInstallBaseDirRef.current = state?.legacy_install?.base_dir ?? null; }, [state?.legacy_install?.base_dir]);
   const configuredGames = persistedSettings
     ? GAME_ORDER.filter((gameId) => Boolean(persistedSettings.mod_paths[gameId]))
     : [];
@@ -330,6 +366,14 @@ function App() {
     const q = itemSearch.trim().toLowerCase();
     return item.name.toLowerCase().includes(q) || item.id.toLowerCase().includes(q);
   });
+  const sortedItemMods = itemMods
+    ? [...itemMods.mods].sort((left, right) => {
+        if (left.disabled !== right.disabled) {
+          return Number(left.disabled) - Number(right.disabled);
+        }
+        return left.display_name.localeCompare(right.display_name, undefined, { sensitivity: "base" });
+      })
+    : [];
   const currentPreviewPath = modPreviewImages[previewIndex] ?? modPreviewImages[0] ?? null;
   const themeMode = normalizeTheme(draftSettings?.theme ?? persistedSettings?.theme);
   const isGameTheme = themeMode === "game";
@@ -414,6 +458,22 @@ function App() {
     setSaveMessage(null);
   }
 
+  async function persistSettingsPatch(patch: Partial<Settings>) {
+    const currentSettings = persistedSettingsRef.current;
+    if (!currentSettings) {
+      return;
+    }
+
+    const nextSettings = { ...currentSettings, ...patch };
+    await invoke<string>("save_legacy_settings", {
+      baseDir: legacyInstallBaseDirRef.current,
+      settings: nextSettings,
+    });
+
+    setState((current) => (current ? { ...current, settings: nextSettings } : current));
+    setDraftSettings((current) => (current ? { ...current, ...patch } : nextSettings));
+  }
+
   function toAssetSrc(path: string): string {
     const localPath = path.replace(/^file:\/+/i, "").replace(/^\/+([A-Za-z]:)/, "$1").replace(/\//g, "\\");
     try {
@@ -429,8 +489,12 @@ function App() {
     category: CategoryKey,
     item: ItemCatalogEntry,
     modRoot: string,
+    options?: { showLoading?: boolean },
   ) {
-    setItemLoading(true);
+    const showLoading = options?.showLoading ?? true;
+    if (showLoading) {
+      setItemLoading(true);
+    }
 
     try {
       const nextMods = await invoke<ItemModsSummary>("load_item_mods", {
@@ -443,11 +507,17 @@ function App() {
       setItemMods(nextMods);
       setActiveItemId(item.id);
     } finally {
-      setItemLoading(false);
+      if (showLoading) {
+        setItemLoading(false);
+      }
     }
   }
 
-  async function loadGameState(gameId: GameKey, preferredItemId?: string | null) {
+  async function loadGameState(
+    gameId: GameKey,
+    preferredItemId?: string | null,
+    options?: { showItemLoading?: boolean },
+  ) {
     if (!persistedSettings) {
       return;
     }
@@ -461,8 +531,7 @@ function App() {
         invoke<GameScanSummary>("scan_game_mods", { game: gameId, modRoot }),
         invoke<GameInventorySummary>("load_game_inventory", { game: gameId, modRoot }),
       ]);
-
-      setScan(nextScan);
+      setGameScans((current) => ({ ...current, [gameId]: nextScan }));
       setInventory(nextInventory);
 
       const categoryData = nextInventory.categories.find((category) => category.category === activeCategory);
@@ -471,7 +540,9 @@ function App() {
         ?? (activeCategory === "characters" ? null : firstItem);
 
       if (nextItem) {
-        await loadItemMods(gameId, activeCategory, nextItem, modRoot);
+        await loadItemMods(gameId, activeCategory, nextItem, modRoot, {
+          showLoading: options?.showItemLoading ?? true,
+        });
         if (activeCategory === "characters") {
           setManagerCharacterView("workspace");
         }
@@ -500,6 +571,29 @@ function App() {
       setState(nextState);
       setDraftSettings(nextState.settings);
       setActiveGame(nextGame);
+      const overviewEntries = await Promise.all(
+        GAME_ORDER.map(async (gameId) => {
+          const modRoot = (nextState.settings.mod_paths[gameId] ?? "").trim();
+          if (!modRoot) {
+            return [gameId, null] as const;
+          }
+
+          try {
+            const nextScan = await invoke<GameScanSummary>("scan_game_mods", { game: gameId, modRoot });
+            return [gameId, nextScan] as const;
+          } catch {
+            return [gameId, null] as const;
+          }
+        }),
+      );
+      setGameScans(
+        overviewEntries.reduce<Partial<Record<GameKey, GameScanSummary>>>((acc, [gameId, nextScan]) => {
+          if (nextScan) {
+            acc[gameId] = nextScan;
+          }
+          return acc;
+        }, {}),
+      );
       if (nextState.settings.mod_paths) {
         invoke("ensure_buffer_values_folders", { modPaths: nextState.settings.mod_paths }).catch(() => {});
       }
@@ -632,6 +726,79 @@ function App() {
     );
   }, [persistedSettings?.window_width, persistedSettings?.window_height, persistedSettings?.window_x, persistedSettings?.window_y]);
 
+  useEffect(() => {
+    if (!persistedSettings) {
+      return;
+    }
+
+    const window = getCurrentWindow();
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleWindowBoundsSave = async () => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+      }
+
+      saveTimer = setTimeout(() => {
+        void (async () => {
+          try {
+            const [size, position] = await Promise.all([window.innerSize(), window.outerPosition()]);
+            const currentSettings = persistedSettingsRef.current;
+            if (!currentSettings) {
+              return;
+            }
+
+            const nextWidth = Math.max(800, Math.round(size.width));
+            const nextHeight = Math.max(600, Math.round(size.height));
+            const nextX = Math.round(position.x);
+            const nextY = Math.round(position.y);
+
+            if (
+              currentSettings.window_width === nextWidth
+              && currentSettings.window_height === nextHeight
+              && currentSettings.window_x === nextX
+              && currentSettings.window_y === nextY
+            ) {
+              return;
+            }
+
+            await persistSettingsPatch({
+              window_width: nextWidth,
+              window_height: nextHeight,
+              window_x: nextX,
+              window_y: nextY,
+            });
+          } catch {
+            // Ignore transient window state read/save failures.
+          }
+        })();
+      }, 250);
+    };
+
+    let unlistenResize: (() => void) | undefined;
+    let unlistenMove: (() => void) | undefined;
+
+    void window.onResized(() => {
+      void scheduleWindowBoundsSave();
+    }).then((unlisten) => {
+      unlistenResize = unlisten;
+    });
+
+    void window.onMoved(() => {
+      void scheduleWindowBoundsSave();
+    }).then((unlisten) => {
+      unlistenMove = unlisten;
+    });
+
+    return () => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+      }
+      unlistenResize?.();
+      unlistenMove?.();
+    };
+  }, [persistedSettings]);
+
   async function ensurePreviewFallback(path: string) {
     try {
       const dataUrl = await invoke<string>("load_image_data_url", { path });
@@ -661,8 +828,8 @@ function App() {
     }
 
     setAutoUpdateChecked(true);
-    // On startup: check silently only. Do not auto-launch update flows.
-    void handleCheckForUpdates({ silentUpToDate: true, autoPrompt: false });
+    // On startup: use cached result if fresh enough; do not auto-launch update flows.
+    void handleCheckForUpdates({ silentUpToDate: true, autoPrompt: false, force: false });
   }, [persistedSettings?.auto_check_updates, autoUpdateChecked]);
 
   useEffect(() => {
@@ -783,6 +950,12 @@ function App() {
     setItemMods(null);
     setModDetails(null);
     updateDraftSettings((current) => ({ ...current, last_selected_game: gameId }));
+
+    try {
+      await persistSettingsPatch({ last_selected_game: gameId });
+    } catch (error) {
+      setSaveMessage(`Failed to save selected game: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async function handleCategorySelect(category: CategoryKey) {
@@ -803,7 +976,7 @@ function App() {
 
     try {
       await invoke<string>("toggle_mod_folder", { path });
-      await loadGameState(highlightedGame, itemMods.item_id);
+      await loadGameState(highlightedGame, itemMods.item_id, { showItemLoading: false });
     } catch (toggleError) {
       setScanError(toggleError instanceof Error ? toggleError.message : String(toggleError));
     } finally {
@@ -819,7 +992,11 @@ function App() {
         game: highlightedGame,
         itemId,
       });
-      await loadGameState(highlightedGame, itemId);
+      if (activeCategory === "characters" && managerCharacterView === "grid") {
+        await loadGameState(highlightedGame, null, { showItemLoading: false });
+      } else {
+        await loadGameState(highlightedGame, activeItemId, { showItemLoading: false });
+      }
     } catch (favoriteError) {
       setScanError(favoriteError instanceof Error ? favoriteError.message : String(favoriteError));
     } finally {
@@ -1053,7 +1230,7 @@ function App() {
     }
   }
 
-  async function handleCheckForUpdates(options?: { autoPrompt?: boolean; silentUpToDate?: boolean }) {
+  async function handleCheckForUpdates(options?: { autoPrompt?: boolean; silentUpToDate?: boolean; force?: boolean }) {
     setUpdateChecking(true);
     if (!options?.silentUpToDate) {
       setUpdateMsg(null);
@@ -1072,7 +1249,7 @@ function App() {
         resources_url: string | null;
         exe_url: string | null;
         updater_url: string | null;
-      }>("check_for_updates");
+      }>("check_for_updates", { force: options?.force ?? false });
 
       // Keep local updater binary in sync with the latest release payload.
       if (info.updater_url) {
@@ -1234,10 +1411,11 @@ function App() {
 
   function renderGameCard(gameId: GameKey) {
     const game = GAMES[gameId];
+    const identity = GAME_CARD_IDENTITIES[gameId];
     const modPath = persistedSettings?.mod_paths[gameId] ?? "";
     const isSelected = persistedSettings?.last_selected_game === gameId;
     const isActive = highlightedGame === gameId;
-    const categorySummary = scan?.game === gameId ? scan : null;
+    const categorySummary = gameScans[gameId] ?? null;
 
     return (
       <button
@@ -1247,24 +1425,43 @@ function App() {
           void handleGameSelect(gameId);
         }}
         className={clsx(
-          "text-left rounded-[22px] border border-white/12 bg-white/6 p-4 shadow-[0_16px_44px_rgba(4,7,22,0.24)] backdrop-blur-sm transition-transform duration-300 hover:-translate-y-0.5",
+          "group text-left rounded-[22px] border border-white/12 bg-white/6 p-4 shadow-[0_16px_44px_rgba(4,7,22,0.24)] backdrop-blur-sm transition-transform duration-300 hover:-translate-y-0.5",
           isSelected && "ring-1 ring-white/30",
           isActive && "border-white/30 bg-white/10",
         )}
         style={{
-          backgroundImage: `linear-gradient(135deg, ${game.accent}22, rgba(255,255,255,0.04) 55%)`,
+          backgroundImage: `${identity.overlay}, linear-gradient(135deg, ${game.accent}24, rgba(255,255,255,0.04) 55%)`,
+          boxShadow: isActive
+            ? `0 18px 46px ${alphaColor(game.accent, 0.22, "rgba(15,23,42,0.22)")}`
+            : `0 16px 44px ${alphaColor(game.accent, 0.1, "rgba(4,7,22,0.24)")}`,
         }}
       >
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-[10px] uppercase tracking-[0.24em] text-slate-300/70">{game.shortLabel}</p>
             <h2 className="mt-1.5 text-lg font-semibold text-white">{game.name}</h2>
+            <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-300/55">{identity.tagline}</p>
           </div>
           <span
             className="inline-flex h-8 min-w-8 items-center justify-center rounded-full px-2.5 text-[11px] font-semibold text-slate-950"
             style={{ backgroundColor: game.accent }}
           >
             {game.shortLabel}
+          </span>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2">
+          <span
+            className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/92"
+            style={{
+              borderColor: alphaColor(game.accent, 0.34, "rgba(255,255,255,0.2)"),
+              backgroundColor: alphaColor(game.accent, 0.12, "rgba(255,255,255,0.06)"),
+            }}
+          >
+            {identity.badge}
+          </span>
+          <span className="text-[10px] uppercase tracking-[0.18em] text-slate-400/80">
+            {categorySummary?.total_items ?? 0} items tracked
           </span>
         </div>
 
@@ -1280,9 +1477,15 @@ function App() {
           </p>
         </div>
 
-        <div className="mt-3 flex items-center justify-between text-xs text-slate-300/75">
-          <span>{categorySummary?.enabled_mods ?? 0} enabled mods</span>
-          <span>{isActive ? "Inspecting" : isSelected ? "Current game" : "Available"}</span>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-xl border border-white/8 bg-white/4 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Enabled</p>
+            <p className="mt-1 font-semibold text-white">{categorySummary?.enabled_mods ?? 0}</p>
+          </div>
+          <div className="rounded-xl border border-white/8 bg-white/4 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Status</p>
+            <p className="mt-1 font-semibold text-white">{isActive ? "Inspecting" : isSelected ? "Current" : "Available"}</p>
+          </div>
         </div>
       </button>
     );
@@ -1523,7 +1726,7 @@ function App() {
             </button>
             <button
               type="button"
-              onClick={() => void handleCheckForUpdates()}
+              onClick={() => void handleCheckForUpdates({ force: true })}
               disabled={updateChecking || updateDownloading}
               className={clsx(
                 "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
@@ -1752,6 +1955,55 @@ function App() {
               placeholder="Filter items…"
               className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs text-white placeholder:text-slate-500"
             />
+
+            {activeCategory === "characters" ? (
+              <div className="mt-4 rounded-2xl border border-white/8 bg-white/4 p-4">
+                {addCharFormOpen ? (
+                  <div className="space-y-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Add Custom Character</p>
+                    <input
+                      value={addCharId}
+                      onChange={(e) => { setAddCharId(e.currentTarget.value); }}
+                      placeholder="ID (e.g. MyChar)"
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white"
+                    />
+                    <input
+                      value={addCharName}
+                      onChange={(e) => { setAddCharName(e.currentTarget.value); }}
+                      placeholder="Display name"
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { void handleAddCharacter(); }}
+                        disabled={addingChar || !addCharId.trim() || !addCharName.trim()}
+                        className="flex-1 rounded-full border border-white/10 bg-white py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                      >
+                        {addingChar ? "Adding..." : "Add"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setAddCharFormOpen(false); setAddCharId(""); setAddCharName(""); }}
+                        className="flex-1 rounded-full border border-white/10 py-2 text-sm text-slate-300 transition hover:bg-white/8"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {scanError ? <p className="text-xs text-rose-300">{scanError}</p> : null}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setAddCharFormOpen(true); }}
+                    className="w-full rounded-xl border border-dashed border-white/15 py-2 text-sm text-slate-400 transition hover:border-white/30 hover:text-white"
+                  >
+                    + Add Custom Character
+                  </button>
+                )}
+              </div>
+            ) : null}
+
             <div
               className={clsx(
                 "mt-4 overflow-x-hidden pr-1",
@@ -1765,10 +2017,21 @@ function App() {
                   const isActive = activeItemId === item.id;
 
                   return (
-                    <button
+                    <article
                       key={item.id}
-                      type="button"
+                      role="button"
+                      tabIndex={0}
                       onClick={() => {
+                        if (activeCategory === "characters") {
+                          setManagerCharacterView("workspace");
+                        }
+                        void loadItemMods(highlightedGame, activeCategory, item, currentModRoot);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") {
+                          return;
+                        }
+                        event.preventDefault();
                         if (activeCategory === "characters") {
                           setManagerCharacterView("workspace");
                         }
@@ -1846,6 +2109,7 @@ function App() {
                             <button
                               type="button"
                               onClick={(event) => {
+                                event.preventDefault();
                                 event.stopPropagation();
                                 void handleRemoveCharacter(item.id);
                               }}
@@ -1859,6 +2123,7 @@ function App() {
                           <button
                             type="button"
                             onClick={(event) => {
+                              event.preventDefault();
                               event.stopPropagation();
                               void handleToggleFavorite(item.id);
                             }}
@@ -1875,7 +2140,7 @@ function App() {
                           </button>
                         </div>
                       </div>
-                    </button>
+                    </article>
                   );
                 })
               ) : (
@@ -1885,53 +2150,6 @@ function App() {
               )}
             </div>
 
-            {activeCategory === "characters" ? (
-              <div className="mt-4 rounded-2xl border border-white/8 bg-white/4 p-4">
-                {addCharFormOpen ? (
-                  <div className="space-y-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Add Custom Character</p>
-                    <input
-                      value={addCharId}
-                      onChange={(e) => { setAddCharId(e.currentTarget.value); }}
-                      placeholder="ID (e.g. MyChar)"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white"
-                    />
-                    <input
-                      value={addCharName}
-                      onChange={(e) => { setAddCharName(e.currentTarget.value); }}
-                      placeholder="Display name"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
-                    />
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => { void handleAddCharacter(); }}
-                        disabled={addingChar || !addCharId.trim() || !addCharName.trim()}
-                        className="flex-1 rounded-full border border-white/10 bg-white py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
-                      >
-                        {addingChar ? "Adding..." : "Add"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setAddCharFormOpen(false); setAddCharId(""); setAddCharName(""); }}
-                        className="flex-1 rounded-full border border-white/10 py-2 text-sm text-slate-300 transition hover:bg-white/8"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                    {scanError ? <p className="text-xs text-rose-300">{scanError}</p> : null}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => { setAddCharFormOpen(true); }}
-                    className="w-full rounded-xl border border-dashed border-white/15 py-2 text-sm text-slate-400 transition hover:border-white/30 hover:text-white"
-                  >
-                    + Add Custom Character
-                  </button>
-                )}
-              </div>
-            ) : null}
           </aside>
           )}
 
@@ -2051,18 +2269,18 @@ function App() {
               </div>
             ) : null}
 
-            <div className="mt-6 grid gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
-              <div className="max-h-[58vh] space-y-3 overflow-y-auto pr-1">
+            <div className="mt-6 grid gap-4 xl:h-[72vh] xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)] xl:items-start">
+              <div className="space-y-3 pr-1 xl:h-full xl:min-h-0 xl:overflow-y-auto">
               {itemLoading ? (
                 <div className="rounded-2xl border border-white/8 bg-white/4 p-5 text-sm text-slate-300">
                   Loading item mods...
                 </div>
-              ) : itemMods?.mods.length ? (
-                itemMods.mods.map((mod) => (
+              ) : sortedItemMods.length ? (
+                sortedItemMods.map((mod) => (
                   <article
                     key={mod.path}
                     className={clsx(
-                      "cursor-pointer rounded-[24px] border bg-white/4 p-5 transition",
+                      "cursor-pointer rounded-[20px] border bg-white/4 p-4 transition",
                       modDetails?.mod_path === mod.path
                         ? "border-cyan-300/35 bg-cyan-300/10"
                         : "border-white/8 hover:border-white/25 hover:bg-white/8",
@@ -2077,12 +2295,12 @@ function App() {
                       }
                     }}
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-base font-medium text-white">{mod.display_name}</p>
-                        <p className="mt-2 break-all font-mono text-xs text-slate-400">{mod.path}</p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-col gap-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-base font-medium text-white">{mod.display_name}</p>
+                          <p className="mt-2 break-all font-mono text-xs text-slate-400">{mod.path}</p>
+                        </div>
                         <span
                           className={clsx(
                             "rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.22em]",
@@ -2093,13 +2311,15 @@ function App() {
                         >
                           {mod.disabled ? "Disabled" : "Enabled"}
                         </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
                         <button
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleOpenInExplorer(mod.path);
                           }}
-                          className="rounded-full border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/8"
+                          className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/8"
                           title="Open in Explorer"
                         >
                           Open
@@ -2111,7 +2331,7 @@ function App() {
                             void handleToggleMod(mod.path);
                           }}
                           disabled={togglePath === mod.path}
-                          className="rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                          className="rounded-xl border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
                         >
                           {togglePath === mod.path ? "Working..." : mod.disabled ? "Enable" : "Disable"}
                         </button>
@@ -2126,7 +2346,7 @@ function App() {
               )}
               </div>
 
-              <div className="rounded-[24px] border border-white/8 bg-white/4 p-5">
+              <div className="rounded-[24px] border border-white/8 bg-white/4 p-5 xl:flex xl:h-full xl:min-h-0 xl:flex-col">
               <p className="text-xs uppercase tracking-[0.2em] text-slate-400">INI Inspector</p>
               <p className="mt-2 break-all font-mono text-xs text-slate-400">
                 {modDetails?.ini_path ?? modDetails?.mod_path ?? "Select a mod and inspect it."}
@@ -2191,7 +2411,7 @@ function App() {
                   </div>
                 </div>
               )}
-              <div className="mt-4 space-y-2">
+              <div className="mt-4 space-y-2 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
                 {modDetailsLoading ? (
                   <p className="text-sm text-slate-300">Loading INI data...</p>
                 ) : modDetails?.toggles.length ? (

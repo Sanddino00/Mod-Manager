@@ -814,12 +814,58 @@ fn normalize_release_tag(value: &str) -> String {
         .collect::<String>()
 }
 
+/// Launch a process that may require UAC elevation.
+/// `Command::new().spawn()` fails with os error 740 when the target exe has a
+/// requireAdministrator manifest and the current process is not elevated.
+/// Falling back to `powershell Start-Process` causes Windows to show a UAC
+/// prompt instead of silently failing.
+fn spawn_possibly_elevated(
+    path: &std::path::Path,
+    work_dir: &std::path::Path,
+    args: &[String],
+) -> Result<(), String> {
+    let result = Command::new(path)
+        .current_dir(work_dir)
+        .args(args)
+        .spawn();
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(740) => {
+            // Build a PowerShell argument list: each token as a quoted string.
+            let arg_list = if args.is_empty() {
+                String::new()
+            } else {
+                args.iter()
+                    .map(|a| format!("'{}'", a.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let ps_cmd = format!(
+                "Start-Process -FilePath '{}' -WorkingDirectory '{}'{}",
+                path.display().to_string().replace('\'', "''"),
+                work_dir.display().to_string().replace('\'', "''"),
+                if arg_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(" -ArgumentList {}", arg_list)
+                }
+            );
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn fetch_latest_release_json(api_url: &str) -> Result<Value, String> {
     let output = background_command("curl")
         .args([
             "-s",
             "-L",
-            "--fail",
             "-H",
             "Accept: application/vnd.github.v3+json",
             "-H",
@@ -830,11 +876,29 @@ fn fetch_latest_release_json(api_url: &str) -> Result<Value, String> {
         .map_err(|err| format!("curl not available: {err}"))?;
 
     if !output.status.success() {
-        return Err("Failed to reach GitHub API".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(if stderr.is_empty() {
+            "Failed to reach GitHub API (network error)".to_string()
+        } else {
+            format!("Failed to reach GitHub API: {}", stderr.trim())
+        });
     }
 
     let body = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&body).map_err(|err| err.to_string())
+    let json: Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
+
+    // GitHub returns {"message":"..."} for errors (Not Found, rate limit, etc.)
+    if let Some(msg) = json.get("message").and_then(Value::as_str) {
+        if msg.eq_ignore_ascii_case("not found") {
+            return Err("No releases published yet for this repository".to_string());
+        }
+        if msg.to_ascii_lowercase().contains("rate limit") {
+            return Err("rate_limit_exceeded".to_string());
+        }
+        return Err(format!("GitHub API error: {msg}"));
+    }
+
+    Ok(json)
 }
 
 fn extract_asset_url(release: &Value, asset_name: &str) -> Option<String> {
@@ -924,6 +988,9 @@ fn save_settings_metadata(update: impl FnOnce(&mut Map<String, Value>)) {
     };
 
     if let Value::Object(map) = &mut settings_json {
+        // Migrate away from old verbose key names written by earlier versions.
+        map.remove("last_update_check_ts");
+        map.remove("last_update_check_result");
         update(map);
     }
 
@@ -2051,9 +2118,32 @@ fn remove_custom_character(game: String, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn check_for_updates() -> Result<Value, String> {
+fn check_for_updates(force: bool) -> Result<Value, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     let resources_dir = resolve_resources_dir()?;
     let settings = load_settings_snapshot().ok();
+
+    const CACHE_TTL_SECS: u64 = 3600;
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Return cached result unless caller forced a fresh check.
+    if !force {
+        if let Some(ref s) = settings {
+            if let (Some(ts), Some(cached)) = (
+                s.get("update_check_ts").and_then(Value::as_u64),
+                s.get("update_check_result"),
+            ) {
+                if now_secs.saturating_sub(ts) < CACHE_TTL_SECS {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
     let current_resources_version = settings
         .as_ref()
         .and_then(|s| s.get("version").and_then(Value::as_str).map(ToOwned::to_owned))
@@ -2067,8 +2157,29 @@ fn check_for_updates() -> Result<Value, String> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-    let app_release = fetch_latest_release_json(APP_RELEASES_API)?;
-    let resources_release = fetch_latest_release_json(RESOURCES_RELEASES_API)?;
+    // Treat "no releases yet" as not-available rather than a hard error.
+    // Propagate rate-limit errors so we can handle them below.
+    fn fetch_or_empty(api_url: &str) -> Result<Value, String> {
+        match fetch_latest_release_json(api_url) {
+            Ok(v) => Ok(v),
+            Err(e) if e.contains("No releases published") => Ok(json!({})),
+            Err(e) => Err(e),
+        }
+    }
+    let app_release = match fetch_or_empty(APP_RELEASES_API) {
+        Ok(v) => v,
+        Err(e) if e == "rate_limit_exceeded" => {
+            return Err("Rate limit reached — update check will retry automatically in 1 hour.".to_string());
+        }
+        Err(e) => return Err(e),
+    };
+    let resources_release = match fetch_or_empty(RESOURCES_RELEASES_API) {
+        Ok(v) => v,
+        Err(e) if e == "rate_limit_exceeded" => {
+            return Err("Rate limit reached — update check will retry automatically in 1 hour.".to_string());
+        }
+        Err(e) => return Err(e),
+    };
 
     let latest_app_tag = app_release["tag_name"]
         .as_str()
@@ -2129,7 +2240,7 @@ fn check_for_updates() -> Result<Value, String> {
 
     let any_update_available = app_update_available || resources_update_available;
 
-    Ok(json!({
+    let result = json!({
         "available": any_update_available,
         "current_version": current_app_version,
         "latest_tag": latest_app_tag,
@@ -2142,7 +2253,16 @@ fn check_for_updates() -> Result<Value, String> {
         "resources_latest_tag": latest_resources_tag,
         "exe_url": exe_url,
         "updater_url": updater_url,
-    }))
+    });
+
+    // Persist cache back into settings.json under tidy key names.
+    let cached = result.clone();
+    save_settings_metadata(move |map| {
+        map.insert("update_check_ts".to_string(), json!(now_secs));
+        map.insert("update_check_result".to_string(), cached);
+    });
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2208,11 +2328,7 @@ fn download_and_launch_updater(
         cmd_args.push(uu.clone());
     }
 
-    Command::new(&updater_path)
-        .current_dir(&exe_dir)
-        .args(&cmd_args)
-        .spawn()
-        .map_err(|err| err.to_string())?;
+    spawn_possibly_elevated(&updater_path, &exe_dir, &cmd_args)?;
 
     Ok(normalize_path(&updater_path))
 }
@@ -2261,11 +2377,7 @@ fn launch_local_updater(
         cmd_args.push(uu.clone());
     }
 
-    Command::new(&updater_path)
-        .current_dir(&exe_dir)
-        .args(&cmd_args)
-        .spawn()
-        .map_err(|err| err.to_string())?;
+    spawn_possibly_elevated(&updater_path, &exe_dir, &cmd_args)?;
 
     Ok(normalize_path(&updater_path))
 }

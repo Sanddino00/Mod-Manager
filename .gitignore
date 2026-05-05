@@ -41,6 +41,6 @@ src-tauri/gen/
 Thumbs.db
 ehthumbs.db
 
-
+legacy_versions
 legacy_versions/resources.zip
 legacy_versions/OldVersions/

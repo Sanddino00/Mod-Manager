@@ -194,6 +194,13 @@ fn write_installed_app_tag(install_dir: &PathBuf, tag: &str) -> Result<(), Strin
             Value::String(normalized.clone()),
         );
         map.insert("last_release_tag".to_string(), Value::String(normalized));
+        // Clear the update check cache so the freshly-launched manager hits
+        // the API instead of serving a stale "update available" result.
+        map.remove("update_check_ts");
+        map.remove("update_check_result");
+        // Also strip old key names written by previous versions.
+        map.remove("last_update_check_ts");
+        map.remove("last_update_check_result");
     }
 
     std::fs::create_dir_all(&resources_dir).map_err(|e| e.to_string())?;

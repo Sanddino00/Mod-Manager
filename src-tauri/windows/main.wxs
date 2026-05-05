@@ -39,14 +39,10 @@
 
             <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
 
-        <InstallExecuteSequence>
-            <RemoveShortcuts>Installed AND NOT UPGRADINGPRODUCTCODE</RemoveShortcuts>
-        </InstallExecuteSequence>
-
         <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
 
 
-        <Icon Id="ProductIcon" SourceFile="C:\Users\sandr\Documents\My Games\mod-manager-v2\src-tauri\target\release\resources\icon.ico"/>
+        <Icon Id="ProductIcon" SourceFile="$(sys.SOURCEFILEDIR)..\..\resources\icon.ico"/>
         <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
         <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
         <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
@@ -94,9 +90,6 @@
             <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
                 <Directory Id="INSTALLDIR" Name="mod-manager-v2"/>
             </Directory>
-            <Directory Id="ProgramMenuFolder">
-                <Directory Id="ApplicationProgramsFolder" Name="mod-manager-v2"/>
-            </Directory>
         </Directory>
 
         <DirectoryRef Id="INSTALLDIR">
@@ -107,45 +100,12 @@
                 <!-- Change the Root to HKCU for perUser installations -->
 </Component>
             <Component Id="Path" Guid="46e2f8f4-b78b-5b37-995d-3899bd043555" Win64="$(var.Win64)">
-                <File Id="Path" Source="C:\Users\sandr\Documents\My Games\mod-manager-v2\src-tauri\target\release\mod-manager-v2.exe" KeyPath="yes" Checksum="yes"/>
+                <File Id="Path" Source="$(sys.SOURCEFILEDIR)..\..\mod-manager-v2.exe" KeyPath="yes" Checksum="yes"/>
 </Component>
 <Component Id="updater" Guid="ee80ccd9-30a6-4ef3-b50d-3737f93851c1" Win64="$(var.Win64)">
-                <File Id="Bin_updater" Source="C:\Users\sandr\Documents\My Games\mod-manager-v2\src-tauri\target\release\updater.exe" KeyPath="yes"/>
+                <File Id="Bin_updater" Source="$(sys.SOURCEFILEDIR)..\..\updater.exe" KeyPath="yes"/>
             </Component>
-            <Component Id="I2fdcc9523de24d118d47b12e789af51d" Guid="8fc80df3-ba2f-4e51-b1ba-edcb849d582b" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I2fdcc9523de24d118d47b12e789af51d" Source="C:\Users\sandr\Documents\My Games\mod-manager-v2\src-tauri\target\release\mod_manager_v2_lib.dll" /></Component>
-            <Component Id="CMP_UninstallShortcut" Guid="*">
-
-                <Shortcut Id="UninstallShortcut"
-						  Name="Uninstall mod-manager-v2"
-						  Description="Uninstalls mod-manager-v2"
-						  Target="[System64Folder]msiexec.exe"
-						  Arguments="/x [ProductCode]" />
-
-				<RemoveFolder Id="INSTALLDIR"
-							  On="uninstall" />
-
-				<RegistryValue Root="HKCU"
-							   Key="Software\sandrino\mod-manager-v2"
-							   Name="Uninstaller Shortcut"
-							   Type="integer"
-							   Value="1"
-							   KeyPath="yes" />
-            </Component>
-        </DirectoryRef>
-
-        <DirectoryRef Id="ApplicationProgramsFolder">
-            <Component Id="ApplicationShortcut" Guid="*">
-                <Shortcut Id="ApplicationStartMenuShortcut"
-                    Name="mod-manager-v2"
-                    Description="Runs mod-manager-v2"
-                    Target="[!Path]"
-                    Icon="ProductIcon"
-                    WorkingDirectory="INSTALLDIR">
-                    <ShortcutProperty Key="System.AppUserModel.ID" Value="com.sandrino.mod-manager-v2"/>
-                </Shortcut>
-                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
-                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
-           </Component>
+            <Component Id="I2fdcc9523de24d118d47b12e789af51d" Guid="8fc80df3-ba2f-4e51-b1ba-edcb849d582b" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I2fdcc9523de24d118d47b12e789af51d" Source="$(sys.SOURCEFILEDIR)..\..\mod_manager_v2_lib.dll" /></Component>
         </DirectoryRef>
 
 <Feature
@@ -166,8 +126,6 @@
                 Title="Shortcuts"
                 Level="1">
                 <ComponentRef Id="Path"/>
-                <ComponentRef Id="CMP_UninstallShortcut" />
-                <ComponentRef Id="ApplicationShortcut" />
             </Feature>
 
             <Feature
