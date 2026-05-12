@@ -10,6 +10,8 @@ Features:
 
 -Mod-Fix managment / use 
 
+-Link to RabbitFx (Planned TeFx and Orfix)
+
 Included Fixes:
 --
 -Swap key saver all games
