@@ -41,4 +41,4 @@ Supported Games:
 
 Contact:
 --
-._______._._______.1 on Discord
+"sanddino or._______._._______.1" on Discord
