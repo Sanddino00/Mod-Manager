@@ -41,4 +41,6 @@ Supported Games:
 
 Contact:
 --
-"sanddino or._______._._______.1" on Discord
+"<img width="176" height="203" alt="image" src="https://github.com/user-attachments/assets/24911b90-819e-47a0-8cc0-0190e36baad3" />
+ or <img width="291" height="206" alt="image" src="https://github.com/user-attachments/assets/2b33a89b-2ccb-498e-9846-999cfe892e3a" />
+"
