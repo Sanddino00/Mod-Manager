@@ -36,3 +36,9 @@ Supported Games:
 -Zenless Zone Zero
 
 -Arknights Endfield
+
+
+
+Contact:
+--
+._______._._______.1 on Discord
