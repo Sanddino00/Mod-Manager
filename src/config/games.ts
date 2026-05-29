@@ -62,29 +62,6 @@ export const GAMEBANANA_URLS: Record<GameKey, string> = {
   end: "https://gamebanana.com/games/21842",
 };
 
-export const ARCA_GAMES = ["gi", "hsr", "wuwa", "zzz"] as const;
-
-export type ArcaGameKey = (typeof ARCA_GAMES)[number];
-
-export const ARCA_URLS: Record<ArcaGameKey, { normal: string; r18: string }> = {
-  gi: {
-    normal: "https://arca.live/b/genshinskinmode?category=%EB%AA%A8%EB%93%9C%EA%B3%B5%EC%9C%A0",
-    r18: "https://arca.live/b/genshinskinmode?category=%EC%A7%88%EB%AC%B8(%EB%AA%A8%EB%93%9C%EC%A0%9C%EC%9E%91)",
-  },
-  hsr: {
-    normal: "https://arca.live/b/genshinskinmode?category=%EB%B6%95%EC%8A%A4%EB%AA%A8%EB%93%9C",
-    r18: "https://arca.live/b/genshinskinmode?category=%EB%B6%95%EC%8A%A4%EB%AA%A8%EB%93%9C%F0%9F%94%9E",
-  },
-  wuwa: {
-    normal: "https://arca.live/b/thingzyoa?category=WWMI",
-    r18: "https://arca.live/b/thingzyoa?category=Wwmi%EC%95%BC",
-  },
-  zzz: {
-    normal: "https://arca.live/b/genshinskinmode?category=%EC%A0%A0%EC%A1%B4%EC%A0%9C",
-    r18: "https://arca.live/b/genshinskinmode?category=%EC%A0%A0%EC%A1%B4%EC%A0%9C%F0%9F%94%9E",
-  },
-};
-
 export const RABBITFX_URLS: Partial<Record<GameKey, string>> = {
   wuwa: "https://gamebanana.com/mods/527815",
   hsr: "https://gamebanana.com/mods/608041",
