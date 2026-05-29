@@ -10,7 +10,12 @@ Features:
 
 -Mod-Fix managment / use 
 
--Link to RabbitFx (Planned to add TeFx and Orfix)
+-Downloading RabbitFx (Planned to add TeFx and Orfix)
+
+-Drag and drop to add mods
+
+-toggle choice save (globalpersist)
+
 
 Included Fixes:
 --
