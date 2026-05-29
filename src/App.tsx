@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -20,10 +21,17 @@ import {
   Star,
 } from "lucide-react";
 import clsx from "clsx";
-import { CATEGORY_ORDER, GAME_ORDER, GAMES, GAMEBANANA_URLS, RABBITFX_URLS } from "./config/games";
+import {
+  CATEGORY_ORDER,
+  GAME_ORDER,
+  GAMES,
+  RABBITFX_URLS,
+} from "./config/games";
 import { SetupWizard } from "./SetupWizard";
 import { BrowseTab } from "./BrowseTab";
 import type { DownloadEventPayload } from "./BrowseTab";
+import { ArcaTab } from "./ArcaTab";
+import { GameBananaWebTab } from "./GameBananaWebTab";
 import type {
   BootstrapState,
   CategoryKey,
@@ -265,6 +273,135 @@ function findBestDropTargetItem(
   return bestScore >= 45 ? bestItem : null;
 }
 
+function findDropTargetItemByPosition(
+  inventory: GameInventorySummary | null,
+  category: CategoryKey,
+  position: { x?: number; y?: number } | null | undefined,
+): ItemCatalogEntry | null {
+  if (!inventory || !position) {
+    return null;
+  }
+
+  const px = Number(position.x);
+  const py = Number(position.y);
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    return null;
+  }
+
+  const categoryItems = inventory.categories.find((entry) => entry.category === category)?.items ?? [];
+  if (categoryItems.length === 0 || typeof document === "undefined") {
+    return null;
+  }
+
+  const ratio = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const points = [
+    { x: px, y: py },
+    { x: px / ratio, y: py / ratio },
+  ];
+
+  for (const point of points) {
+    const node = document.elementFromPoint(point.x, point.y);
+    const card = node instanceof HTMLElement
+      ? node.closest<HTMLElement>("[data-drop-item-id]")
+      : null;
+    const itemId = card?.dataset.dropItemId;
+    if (!itemId) {
+      continue;
+    }
+    const match = categoryItems.find((item) => item.id === itemId);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function sanitizeFolderName(value: string): string {
+  const cleaned = value
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/^\.+/, "")
+    .trim();
+  return cleaned || "mod";
+}
+
+function parseGameBananaModId(url: string): string | null {
+  const match = url.match(/\/mods\/(\d+)/i);
+  return match?.[1] ?? null;
+}
+
+async function fetchGameBananaJson(endpoint: string): Promise<unknown> {
+  const response = await fetch(`https://gamebanana.com/apiv11/${endpoint}`, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GameBanana API ${response.status}: ${response.statusText}`);
+  }
+
+  return response.json() as Promise<unknown>;
+}
+
+function extractGameBananaPreviewUrl(record: Record<string, unknown>): string | null {
+  const media = record._aPreviewMedia as Record<string, unknown> | null | undefined;
+  if (media && typeof media === "object") {
+    const rawImages = media._aImages ?? Object.values(media)[0];
+    const images = Array.isArray(rawImages) ? (rawImages as Record<string, unknown>[]) : null;
+    if (images) {
+      for (const image of images) {
+        const base = image._sBaseUrl as string | undefined;
+        for (const key of ["_sFile530", "_sFile220", "_sFile100", "_sFile"]) {
+          if (base && image[key]) {
+            return `${base}/${image[key] as string}`;
+          }
+        }
+        if (image._sUrl) {
+          return image._sUrl as string;
+        }
+        if (image.url) {
+          return image.url as string;
+        }
+      }
+    }
+  }
+  return (record._sPreviewUrl as string | null) ?? null;
+}
+
+function extractGameBananaFiles(payload: unknown): {
+  name: string;
+  url: string;
+  preview: string | null;
+  isMain: boolean;
+}[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const record = payload as Record<string, unknown>;
+  const filesRaw = record._aFiles as Record<string, unknown>[] | Record<string, Record<string, unknown>> | undefined;
+  const rawList = Array.isArray(filesRaw) ? filesRaw : filesRaw ? Object.values(filesRaw) : [];
+
+  const previewUrl = extractGameBananaPreviewUrl(record);
+
+  return (rawList as Record<string, unknown>[])
+    .filter((file) => file._sDownloadUrl ?? file._sUrl)
+    .map((file) => {
+      let url = ((file._sDownloadUrl as string) || (file._sUrl as string) || "").trim();
+      if (url.startsWith("/")) {
+        url = `https://gamebanana.com${url}`;
+      }
+      const description = ((file._sDescription as string) || "").toLowerCase();
+      const type = ((file._sType as string) || "").toLowerCase();
+
+      return {
+        name: (file._sFile as string) || (file._sName as string) || "download",
+        url,
+        preview: previewUrl,
+        isMain: description.includes("main file") || type.includes("main"),
+      };
+    });
+}
+
 function App() {
   const [state, setState] = useState<BootstrapState | null>(null);
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
@@ -291,9 +428,14 @@ function App() {
   const [fixesLoading, setFixesLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [togglePath, setTogglePath] = useState<string | null>(null);
+  const [renamingModPath, setRenamingModPath] = useState<string | null>(null);
+  const [syncingPersistPath, setSyncingPersistPath] = useState<string | null>(null);
+  const [persistSyncFeedback, setPersistSyncFeedback] = useState<Record<string, { message: string; kind: "saved" | "unchanged" | "error" }>>({});
+  const [renameModInput, setRenameModInput] = useState("");
+  const [renameModBusy, setRenameModBusy] = useState(false);
   const [favoriteItemId, setFavoriteItemId] = useState<string | null>(null);
   const [runningFix, setRunningFix] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"manager" | "browse" | "settings" | "fixes" | "downloads">("manager");
+  const [activeTab, setActiveTab] = useState<"manager" | "browse" | "gbweb" | "arca" | "settings" | "fixes" | "downloads">("manager");
   const [importSource, setImportSource] = useState("");
   const [importingMod, setImportingMod] = useState(false);
   const [addCharId, setAddCharId] = useState("");
@@ -437,6 +579,22 @@ function App() {
         borderColor: gameAccentFaint,
       }
     : undefined;
+  const managerControlCardClassName =
+    themeMode === "light"
+      ? "rounded-2xl border border-slate-300/70 bg-white/88 p-4 shadow-[0_8px_24px_rgba(15,23,42,0.08)]"
+      : themeMode === "game"
+        ? "rounded-2xl border border-white/14 bg-white/8 p-4"
+      : "rounded-2xl border border-white/8 bg-white/4 p-4";
+  const managerControlInputClassName =
+    themeMode === "light"
+      ? "w-full rounded-xl border border-slate-300/75 bg-white px-3 py-2.5 text-sm leading-5 text-slate-900 placeholder:text-slate-500"
+      : themeMode === "game"
+        ? "w-full rounded-xl border border-white/18 bg-white/8 px-3 py-2.5 text-sm leading-5 text-slate-100 placeholder:text-slate-300/85"
+      : "w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2.5 text-sm leading-5 text-white placeholder:text-slate-500";
+  const managerControlInputMonoClassName =
+    themeMode === "light"
+      ? "w-full rounded-xl border border-slate-300/75 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder:text-slate-500"
+      : "w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white";
 
   async function pickFolder(initial?: string) {
     const picked = await open({
@@ -610,6 +768,135 @@ function App() {
     try {
       const nextPanel = await invoke<FixesPanelData>("load_fixes_panel", { game: gameId });
       setFixesPanel(nextPanel);
+    } finally {
+      setFixesLoading(false);
+    }
+  }
+
+  async function handleOpenRabbitFx(gameId: GameKey) {
+    const url = RABBITFX_URLS[gameId];
+    if (!url) {
+      return;
+    }
+
+    try {
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank");
+    }
+  }
+
+  async function handleInstallLatestRabbitFx(gameId: GameKey) {
+    const url = RABBITFX_URLS[gameId];
+    if (!url) {
+      setScanError(`No RabbitFX page is configured for ${GAMES[gameId].name}.`);
+      return;
+    }
+
+    const modId = parseGameBananaModId(url);
+    if (!modId) {
+      setScanError("Could not determine the RabbitFX mod id from its URL.");
+      return;
+    }
+
+    const modRoot = persistedSettings?.mod_paths[gameId]?.trim() ?? "";
+    if (!modRoot) {
+      setScanError(`No mod root configured for ${GAMES[gameId].name}.`);
+      return;
+    }
+
+    setFixesLoading(true);
+    setScanError(null);
+    let requestId = `rabbitfx-${gameId}-${Date.now()}`;
+    let requestModName = `RabbitFX ${GAMES[gameId].shortLabel}`;
+    let requestFileName = "main file";
+    const destinationPath = `${modRoot.replace(/[\\/]+$/, "")}/BufferValues`;
+
+    try {
+      const payload = await fetchGameBananaJson(`Mod/${modId}/ProfilePage`);
+      const files = extractGameBananaFiles(payload);
+      const file = files.find((entry) => entry.isMain) ?? files[0];
+
+      if (!file?.url) {
+        throw new Error("No downloadable file was found on the RabbitFX page.");
+      }
+
+      const record = payload as Record<string, unknown>;
+      const modName = sanitizeFolderName((record._sName as string) || GAMES[gameId].name);
+      const bufferValuesRoot = `${modRoot.replace(/[\\/]+$/, "")}/BufferValues`;
+      requestId = `rabbitfx-${gameId}-${Date.now()}`;
+      requestModName = modName;
+      requestFileName = file.name;
+
+      handleDownloadEvent({
+        kind: "start",
+        id: requestId,
+        modName,
+        fileName: file.name,
+        destinationPath: bufferValuesRoot,
+      });
+
+      // Disable existing RabbitFX folders before installing the latest one.
+      await invoke<ItemModsSummary>("load_item_mods", {
+        game: gameId,
+        category: "buffervalues",
+        itemId: "__root__",
+        itemName: "__root__",
+        modRoot,
+      })
+        .then(async (modsSummary) => {
+          const modNameLower = modName.toLowerCase();
+          const directMatches = modsSummary.mods.filter(
+            (entry) => !entry.disabled && entry.display_name.toLowerCase().startsWith(modNameLower),
+          );
+          const fallbackMatches = modsSummary.mods.filter(
+            (entry) => !entry.disabled && /rabbitfx|rabbit/i.test(entry.display_name),
+          );
+          const toDisable = directMatches.length > 0 ? directMatches : fallbackMatches;
+
+          for (const entry of toDisable) {
+            await invoke<string>("toggle_mod_folder", {
+              path: entry.path,
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+
+      const installResult = await invoke<{
+        installed_path: string;
+        destination_path: string;
+        preview_path: string | null;
+      }>("download_and_install_mod", {
+        url: file.url,
+        destItemPath: bufferValuesRoot,
+        modName,
+        previewUrl: file.preview,
+      });
+
+      handleDownloadEvent({
+        kind: "success",
+        id: requestId,
+        modName,
+        fileName: file.name,
+        destinationPath: installResult.destination_path,
+        installedPath: installResult.installed_path,
+        previewPath: installResult.preview_path,
+      });
+
+      await loadGameState(gameId, activeItemId, { showItemLoading: false });
+      setSaveMessage(`Installed latest RabbitFX for ${GAMES[gameId].name} into BufferValues.`);
+      setActiveTab("fixes");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setScanError(message);
+      handleDownloadEvent({
+        kind: "error",
+        id: requestId,
+        modName: requestModName,
+        fileName: requestFileName,
+        destinationPath,
+        message,
+      });
     } finally {
       setFixesLoading(false);
     }
@@ -832,80 +1119,135 @@ function App() {
     void handleCheckForUpdates({ silentUpToDate: true, autoPrompt: false, force: false });
   }, [persistedSettings?.auto_check_updates, autoUpdateChecked]);
 
+  const processDroppedPaths = useCallback(async (
+    paths: string[],
+    position?: { x?: number; y?: number },
+  ) => {
+    if (paths.length === 0) {
+      return;
+    }
+
+    let targetMods = itemModsRef.current;
+    let targetItemId = targetMods?.item_id ?? null;
+
+    if (!targetMods) {
+      const inventory = inventoryRef.current;
+      const category = activeCategoryRef.current;
+      const matchedByPosition = findDropTargetItemByPosition(
+        inventory,
+        category,
+        position,
+      );
+      const matchedItem = matchedByPosition ?? findBestDropTargetItem(
+        inventory,
+        category,
+        paths,
+      );
+      const settings = persistedSettingsRef.current;
+      const game = highlightedGameRef.current;
+      const modRoot = settings?.mod_paths?.[game] ?? "";
+
+      if (matchedItem && modRoot) {
+        try {
+          targetMods = await invoke<ItemModsSummary>("load_item_mods", {
+            game,
+            category,
+            itemId: matchedItem.id,
+            itemName: matchedItem.name,
+            modRoot,
+          });
+          setItemMods(targetMods);
+          setActiveItemId(matchedItem.id);
+          setManagerCharacterView("workspace");
+          targetItemId = matchedItem.id;
+          setDragDropMsg(
+            matchedByPosition
+              ? `Dropped on ${matchedItem.name}. Importing there.`
+              : `Auto-selected ${matchedItem.name} from dropped folder name.`,
+          );
+        } catch {
+          setDragDropMsg("Could not auto-select an item. Select a character or item first, then drop mod folders.");
+          return;
+        }
+      } else {
+        setDragDropMsg("Select a character or item first, then drop mod folders onto the app.");
+        return;
+      }
+    }
+
+    let imported = 0;
+    const errors: string[] = [];
+    for (const p of paths) {
+      try {
+        await invoke<string>("import_mod_folder", {
+          destItemPath: targetMods.path,
+          sourcePath: p,
+        });
+        imported++;
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    if (errors.length > 0) {
+      setDragDropMsg(errors.join(" | "));
+    } else {
+      setDragDropMsg(`Imported ${imported} mod folder${imported !== 1 ? "s" : ""}.`);
+    }
+
+    await loadGameState(highlightedGameRef.current, targetItemId ?? targetMods.item_id);
+  }, [loadGameState]);
+
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    getCurrentWindow().onDragDropEvent((event) => {
-      const { type } = event.payload;
+    type DropPayload = {
+      type: "enter" | "over" | "drop" | "leave";
+      paths?: string[];
+      position?: { x?: number; y?: number };
+    };
+
+    const handlePayload = (payload: DropPayload) => {
+      const { type } = payload;
       if (type === "enter" || type === "over") {
         setIsDraggingOver(true);
       } else if (type === "leave") {
         setIsDraggingOver(false);
       } else if (type === "drop") {
         setIsDraggingOver(false);
-        const paths: string[] = (event.payload as { paths?: string[] }).paths ?? [];
-        if (paths.length === 0) return;
-        void (async () => {
-          let targetMods = itemModsRef.current;
-          let targetItemId = targetMods?.item_id ?? null;
-
-          if (!targetMods) {
-            const matchedItem = findBestDropTargetItem(
-              inventoryRef.current,
-              activeCategoryRef.current,
-              paths,
-            );
-            const settings = persistedSettingsRef.current;
-            const game = highlightedGameRef.current;
-            const modRoot = settings?.mod_paths?.[game] ?? "";
-
-            if (matchedItem && modRoot) {
-              try {
-                targetMods = await invoke<ItemModsSummary>("load_item_mods", {
-                  game,
-                  category: activeCategoryRef.current,
-                  itemId: matchedItem.id,
-                  itemName: matchedItem.name,
-                  modRoot,
-                });
-                setItemMods(targetMods);
-                setActiveItemId(matchedItem.id);
-                setManagerCharacterView("workspace");
-                targetItemId = matchedItem.id;
-                setDragDropMsg(`Auto-selected ${matchedItem.name} from dropped folder name.`);
-              } catch {
-                setDragDropMsg("Could not auto-select an item. Select a character or item first, then drop mod folders.");
-                return;
-              }
-            } else {
-              setDragDropMsg("Select a character or item first, then drop mod folders onto the app.");
-              return;
-            }
-          }
-
-          let imported = 0;
-          const errors: string[] = [];
-          for (const p of paths) {
-            try {
-              await invoke<string>("import_mod_folder", {
-                destItemPath: targetMods.path,
-                sourcePath: p,
-              });
-              imported++;
-            } catch (err) {
-              errors.push(err instanceof Error ? err.message : String(err));
-            }
-          }
-          if (errors.length > 0) {
-            setDragDropMsg(errors.join(" | "));
-          } else {
-            setDragDropMsg(`Imported ${imported} mod folder${imported !== 1 ? "s" : ""}.`);
-          }
-          await loadGameState(highlightedGameRef.current, targetItemId ?? targetMods.item_id);
-        })();
+        const paths: string[] = payload.paths ?? [];
+        if (paths.length === 0) {
+          setDragDropMsg("Drop detected, but no folder paths were provided by the OS.");
+          return;
+        }
+        void processDroppedPaths(paths, payload.position);
       }
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
-    return () => { unlisten?.(); };
-  }, []);
+    };
+
+    let unlistenWindow: (() => void) | undefined;
+    let unlistenWebview: (() => void) | undefined;
+
+    getCurrentWindow()
+      .onDragDropEvent((event) => {
+        handlePayload(event.payload as DropPayload);
+      })
+      .then((fn) => {
+        unlistenWindow = fn;
+      })
+      .catch(() => {});
+
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        handlePayload(event.payload as DropPayload);
+      })
+      .then((fn) => {
+        unlistenWebview = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      unlistenWindow?.();
+      unlistenWebview?.();
+    };
+  }, [processDroppedPaths]);
 
   async function handleSaveIni() {
     if (!modDetails?.ini_path || !iniSection) return;
@@ -965,6 +1307,7 @@ function App() {
     setModDetails(null);
     setItemSearch("");
     setManagerCharacterView(category === "characters" ? "grid" : "workspace");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function handleToggleMod(path: string) {
@@ -981,6 +1324,78 @@ function App() {
       setScanError(toggleError instanceof Error ? toggleError.message : String(toggleError));
     } finally {
       setTogglePath(null);
+    }
+  }
+
+  async function handleRenameMod(modPath: string) {
+    const nextName = renameModInput.trim();
+    if (!nextName || !itemMods) {
+      return;
+    }
+
+    setRenameModBusy(true);
+    setScanError(null);
+
+    try {
+      const renamedPath = await invoke<string>("rename_mod_folder", {
+        path: modPath,
+        newName: nextName,
+      });
+
+      await loadGameState(highlightedGame, itemMods.item_id, { showItemLoading: false });
+
+      if (modDetails?.mod_path === modPath) {
+        await loadModDetails(renamedPath);
+      }
+
+      setRenamingModPath(null);
+      setRenameModInput("");
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRenameModBusy(false);
+    }
+  }
+
+  async function handleSyncPersistSwapkeys(modPath: string) {
+    setSyncingPersistPath(modPath);
+    setScanError(null);
+    setPersistSyncFeedback((current) => {
+      const next = { ...current };
+      delete next[modPath];
+      return next;
+    });
+
+    try {
+      const updatedFiles = await invoke<number>("sync_global_persist_for_mod", {
+        modPath,
+        gameModRoot: currentModRoot,
+      });
+      if (updatedFiles > 0) {
+        setSaveMessage(`Toggles saved in ${updatedFiles} ini file(s).`);
+      }
+      setPersistSyncFeedback((current) => ({
+        ...current,
+        [modPath]: {
+          message: updatedFiles > 0 ? `Saved ${updatedFiles} ini file(s).` : "No changes needed.",
+          kind: updatedFiles > 0 ? "saved" : "unchanged",
+        },
+      }));
+      if (itemMods) {
+        await loadModDetails(modPath);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setScanError(message);
+      setPersistSyncFeedback((current) => ({
+        ...current,
+        [modPath]: {
+          message,
+          kind: "error",
+        },
+      }));
+    } finally {
+      setSyncingPersistPath(null);
     }
   }
 
@@ -1465,8 +1880,6 @@ function App() {
           </span>
         </div>
 
-        <p className="mt-3 text-xs leading-5 text-slate-300/78">{game.description}</p>
-
         <div className="mt-3 rounded-xl border border-white/10 bg-slate-950/35 p-3">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-slate-400">
             <FolderTree className="h-3.5 w-3.5" />
@@ -1515,16 +1928,224 @@ function App() {
           >
             <div className="text-4xl">📂</div>
             <p className="mt-3 text-lg font-semibold text-cyan-300" style={isGameTheme ? { color: gameAccent } : undefined}>
-              {itemMods ? `Drop to import into ${itemMods.item_id}` : "Select a character first, then drop"}
+              {itemMods ? `Drop to import into ${itemMods.item_id}` : "Drop on a character card to import"}
             </p>
             <p className="mt-1 text-xs text-slate-400">Drop mod folders here</p>
           </div>
         </div>
       )}
       <div className="flex min-h-dvh w-full flex-col px-4 py-4 lg:px-6">
+        <section className={clsx("sticky top-4 z-20 mt-0 flex flex-wrap items-center justify-between gap-3 rounded-[24px] p-4 backdrop-blur-md", panelClassName)}>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("manager");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "manager"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "manager" ? navActiveStyle : navIdleStyle}
+            >
+              <Layers3 className="h-4 w-4" />
+              Manager
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("browse");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "browse"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "browse" ? navActiveStyle : navIdleStyle}
+            >
+              <Globe className="h-4 w-4" />
+              Mod-Browser
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("downloads");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "downloads"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "downloads" ? navActiveStyle : navIdleStyle}
+            >
+              <HardDriveDownload className="h-4 w-4" />
+              Downloads
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("fixes");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "fixes"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "fixes" ? navActiveStyle : navIdleStyle}
+            >
+              <Gamepad2 className="h-4 w-4" />
+              Fix Manager
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("gbweb");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "gbweb"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "gbweb" ? navActiveStyle : navIdleStyle}
+            >
+              <Globe className="h-4 w-4" />
+              GameBanana
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("arca");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "arca"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "arca" ? navActiveStyle : navIdleStyle}
+            >
+              <Globe className="h-4 w-4" />
+              Arca
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("settings");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "settings"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "settings" ? navActiveStyle : navIdleStyle}
+            >
+              <Settings2 className="h-4 w-4" />
+              Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void refresh();
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
+                isGameTheme
+                  ? "text-slate-100 hover:brightness-110"
+                  : "border-white/10 bg-white text-slate-950 hover:bg-cyan-100",
+              )}
+              style={
+                isGameTheme
+                  ? {
+                      borderColor: gameAccentMedium,
+                      backgroundColor: gameAccentSoft,
+                    }
+                  : undefined
+              }
+              disabled={loading || scanLoading || itemLoading || savingSettings}
+            >
+              <RefreshCw
+                className={clsx(
+                  "h-4 w-4",
+                  (loading || scanLoading || itemLoading || savingSettings) && "animate-spin",
+                )}
+              />
+              Refresh state
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCheckForUpdates({ force: true })}
+              disabled={updateChecking || updateDownloading}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
+                updateInfo?.available
+                  ? isGameTheme
+                    ? "text-slate-100"
+                    : "border-emerald-300/30 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/25"
+                  : isGameTheme
+                    ? "text-slate-200/90 hover:bg-white/8"
+                    : "border-white/10 text-slate-300 hover:bg-white/8",
+              )}
+              style={
+                isGameTheme
+                  ? {
+                      borderColor: updateInfo?.available ? gameAccentStrong : gameAccentFaint,
+                      backgroundColor: updateInfo?.available ? gameAccentSoft : "transparent",
+                    }
+                  : undefined
+              }
+            >
+              <Download className="h-4 w-4" />
+              {updateChecking
+                ? "Checking…"
+                : updateInfo?.available
+                  ? `${updateInfo.app_update_available ? "App" : "Resources"} update available`
+                  : "Check updates"}
+            </button>
+            <label
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.14em] text-slate-300"
+              style={isGameTheme ? { borderColor: gameAccentFaint, color: "#dbeafe" } : undefined}
+            >
+              Active game
+              <select
+                value={highlightedGame}
+                onChange={(event) => {
+                  const nextGame = event.currentTarget.value as GameKey;
+                  void handleGameSelect(nextGame);
+                }}
+                className={clsx(
+                  "rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.08em]",
+                  themeMode === "light"
+                    ? "border-slate-300 bg-white text-slate-900"
+                    : "border-white/15 bg-slate-950/65 text-slate-100",
+                )}
+                style={
+                  isGameTheme
+                    ? {
+                        borderColor: gameAccentMedium,
+                        backgroundColor: gameAccentSoft,
+                        color: "#eaf6ff",
+                      }
+                    : undefined
+                }
+              >
+                {GAME_ORDER.map((gameId) => (
+                  <option key={gameId} value={gameId} style={{ backgroundColor: "#f8fafc", color: "#0f172a" }}>
+                    {GAMES[gameId].shortLabel}
+                  </option>
+                ))}
+              </select>
+            </label>
+        </section>
+
         {activeTab === "settings" ? (
         <>
-        <header className={clsx("grid gap-6 rounded-[32px] p-7 lg:grid-cols-[1.6fr_1fr]", shellPanelClassName)}>
+        <header className={clsx("mt-6 grid gap-6 rounded-[32px] p-7 lg:grid-cols-[1.6fr_1fr]", shellPanelClassName)}>
           <div>
             <div
               className="inline-flex items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs uppercase tracking-[0.3em] text-cyan-100"
@@ -1613,154 +2234,6 @@ function App() {
         </section>
         </>
         ) : null}
-
-        <section className={clsx("mt-6 flex flex-wrap items-center justify-between gap-3 rounded-[24px] p-4", panelClassName)}>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("manager");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "manager"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "manager" ? navActiveStyle : navIdleStyle}
-            >
-              <Layers3 className="h-4 w-4" />
-              Manager
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("browse");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "browse"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "browse" ? navActiveStyle : navIdleStyle}
-            >
-              <Globe className="h-4 w-4" />
-              Browse
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("downloads");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "downloads"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "downloads" ? navActiveStyle : navIdleStyle}
-            >
-              <HardDriveDownload className="h-4 w-4" />
-              Downloads
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("fixes");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "fixes"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "fixes" ? navActiveStyle : navIdleStyle}
-            >
-              <Gamepad2 className="h-4 w-4" />
-              Fix Manager
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("settings");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "settings"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "settings" ? navActiveStyle : navIdleStyle}
-            >
-              <Settings2 className="h-4 w-4" />
-              Settings
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void refresh();
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
-                isGameTheme
-                  ? "text-slate-100 hover:brightness-110"
-                  : "border-white/10 bg-white text-slate-950 hover:bg-cyan-100",
-              )}
-              style={
-                isGameTheme
-                  ? {
-                      borderColor: gameAccentMedium,
-                      backgroundColor: gameAccentSoft,
-                    }
-                  : undefined
-              }
-              disabled={loading || scanLoading || itemLoading || savingSettings}
-            >
-              <RefreshCw
-                className={clsx(
-                  "h-4 w-4",
-                  (loading || scanLoading || itemLoading || savingSettings) && "animate-spin",
-                )}
-              />
-              Refresh state
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleCheckForUpdates({ force: true })}
-              disabled={updateChecking || updateDownloading}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
-                updateInfo?.available
-                  ? isGameTheme
-                    ? "text-slate-100"
-                    : "border-emerald-300/30 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/25"
-                  : isGameTheme
-                    ? "text-slate-200/90 hover:bg-white/8"
-                    : "border-white/10 text-slate-300 hover:bg-white/8",
-              )}
-              style={
-                isGameTheme
-                  ? {
-                      borderColor: updateInfo?.available ? gameAccentStrong : gameAccentFaint,
-                      backgroundColor: updateInfo?.available ? gameAccentSoft : "transparent",
-                    }
-                  : undefined
-              }
-            >
-              <Download className="h-4 w-4" />
-              {updateChecking
-                ? "Checking…"
-                : updateInfo?.available
-                  ? `${updateInfo.app_update_available ? "App" : "Resources"} update available`
-                  : "Check updates"}
-            </button>
-            <div
-              className="rounded-full border border-white/10 px-4 py-2 text-sm text-slate-300"
-              style={isGameTheme ? { borderColor: gameAccentFaint, color: "#dbeafe" } : undefined}
-            >
-              Active game: {highlightedGame}
-            </div>
-        </section>
 
         {error ? (
           <section className="mt-6 flex items-start gap-3 rounded-[24px] border border-rose-300/20 bg-rose-400/10 p-5 text-rose-100">
@@ -1860,6 +2333,23 @@ function App() {
             game={highlightedGame}
             gameModRoot={currentModRoot}
             onDownloadEvent={handleDownloadEvent}
+            onGameSelect={(gameId) => {
+              void handleGameSelect(gameId);
+            }}
+          />
+        ) : activeTab === "gbweb" ? (
+          <GameBananaWebTab
+            game={highlightedGame}
+            gameModRoot={currentModRoot}
+            onDownloadEvent={handleDownloadEvent}
+            onGameSelect={(gameId) => {
+              void handleGameSelect(gameId);
+            }}
+          />
+        ) : activeTab === "arca" ? (
+          <ArcaTab
+            gameModRoot={currentModRoot}
+            onDownloadEvent={handleDownloadEvent}
           />
         ) : (
           <>
@@ -1867,32 +2357,6 @@ function App() {
         {activeTab === "manager" ? (
         <>
         <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{GAME_ORDER.map(renderGameCard)}</section>
-
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              void openUrl(GAMEBANANA_URLS[highlightedGame]).catch(() => {
-                window.open(GAMEBANANA_URLS[highlightedGame], "_blank");
-              });
-            }}
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 px-4 py-1.5 text-xs text-slate-300 transition hover:bg-white/8"
-          >
-            GameBanana ↗
-          </button>
-          {RABBITFX_URLS[highlightedGame] ? (
-            <button
-              type="button"
-              onClick={() => {
-                const url = RABBITFX_URLS[highlightedGame]!;
-                void openUrl(url).catch(() => { window.open(url, "_blank"); });
-              }}
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 px-4 py-1.5 text-xs text-slate-300 transition hover:bg-white/8"
-            >
-              RabbitFX ↗
-            </button>
-          ) : null}
-        </div>
 
         <section
           className={clsx(
@@ -1902,7 +2366,7 @@ function App() {
               : "xl:grid-cols-[240px_340px_minmax(0,1fr)]",
           )}
         >
-          <aside className={clsx("rounded-[28px] p-6", panelClassName)}>
+          <aside className={clsx("rounded-[28px] p-6 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto", panelClassName)}>
             <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
               <Layers3 className="h-4 w-4" />
               Categories
@@ -1942,71 +2406,80 @@ function App() {
 
           {activeCategory === "characters" && managerCharacterView === "workspace" ? null : (
           <aside className={clsx("rounded-[28px] p-6", panelClassName)}>
-            <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
-              <Gamepad2 className="h-4 w-4" />
-              {highlightedGameConfig.name} Items
-            </div>
-            <p className="mt-3 break-all text-sm leading-6 text-slate-300/82">{currentCategory?.folder_path ?? currentModRoot}</p>
-            <input
-              value={itemSearch}
-              onChange={(e) => {
-                setItemSearch(e.currentTarget.value);
-              }}
-              placeholder="Filter items…"
-              className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs text-white placeholder:text-slate-500"
-            />
-
-            {activeCategory === "characters" ? (
-              <div className="mt-4 rounded-2xl border border-white/8 bg-white/4 p-4">
-                {addCharFormOpen ? (
-                  <div className="space-y-3">
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Add Custom Character</p>
-                    <input
-                      value={addCharId}
-                      onChange={(e) => { setAddCharId(e.currentTarget.value); }}
-                      placeholder="ID (e.g. MyChar)"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white"
-                    />
-                    <input
-                      value={addCharName}
-                      onChange={(e) => { setAddCharName(e.currentTarget.value); }}
-                      placeholder="Display name"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
-                    />
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => { void handleAddCharacter(); }}
-                        disabled={addingChar || !addCharId.trim() || !addCharName.trim()}
-                        className="flex-1 rounded-full border border-white/10 bg-white py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
-                      >
-                        {addingChar ? "Adding..." : "Add"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setAddCharFormOpen(false); setAddCharId(""); setAddCharName(""); }}
-                        className="flex-1 rounded-full border border-white/10 py-2 text-sm text-slate-300 transition hover:bg-white/8"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                    {scanError ? <p className="text-xs text-rose-300">{scanError}</p> : null}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => { setAddCharFormOpen(true); }}
-                    className="w-full rounded-xl border border-dashed border-white/15 py-2 text-sm text-slate-400 transition hover:border-white/30 hover:text-white"
-                  >
-                    + Add Custom Character
-                  </button>
-                )}
+            <div className={clsx(
+              "sticky top-24 z-20 rounded-2xl pb-3 pt-2",
+              themeMode === "light" ? "bg-slate-50" : themeMode === "game" ? "bg-transparent" : "bg-slate-950",
+            )}>
+              <div className={managerControlCardClassName}>
+                <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
+                  <Gamepad2 className="h-4 w-4" />
+                  {highlightedGameConfig.name} Items
+                </div>
+                <p className="mt-3 break-all text-sm leading-6 text-slate-300/82">{currentCategory?.folder_path ?? currentModRoot}</p>
+                <input
+                  value={itemSearch}
+                  onChange={(e) => {
+                    setItemSearch(e.currentTarget.value);
+                  }}
+                  placeholder="Search…"
+                  className={clsx("mt-3", managerControlInputClassName)}
+                />
               </div>
-            ) : null}
+
+              {activeCategory === "characters" ? (
+                <div className={clsx("mt-3", managerControlCardClassName)}>
+                  {addCharFormOpen ? (
+                    <div className="space-y-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Add Custom Character</p>
+                      <input
+                        value={addCharId}
+                        onChange={(e) => { setAddCharId(e.currentTarget.value); }}
+                        placeholder="ID (e.g. MyChar)"
+                        className={managerControlInputMonoClassName}
+                      />
+                      <input
+                        value={addCharName}
+                        onChange={(e) => { setAddCharName(e.currentTarget.value); }}
+                        placeholder="Display name"
+                        className={themeMode === "light"
+                          ? "w-full rounded-xl border border-slate-300/75 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-500"
+                          : "w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"}
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { void handleAddCharacter(); }}
+                          disabled={addingChar || !addCharId.trim() || !addCharName.trim()}
+                          className="flex-1 rounded-full border border-white/10 bg-white py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                        >
+                          {addingChar ? "Adding..." : "Add"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setAddCharFormOpen(false); setAddCharId(""); setAddCharName(""); }}
+                          className="flex-1 rounded-full border border-white/10 py-2 text-sm text-slate-300 transition hover:bg-white/8"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {scanError ? <p className="text-xs text-rose-300">{scanError}</p> : null}
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => { setAddCharFormOpen(true); }}
+                      className="w-full rounded-xl border border-dashed border-white/15 py-2 text-sm text-slate-400 transition hover:border-white/30 hover:text-white"
+                    >
+                      + Add Custom Character
+                    </button>
+                  )}
+                </div>
+              ) : null}
+            </div>
 
             <div
               className={clsx(
-                "mt-4 overflow-x-hidden pr-1",
+                "mt-2 overflow-x-hidden pr-1",
                 activeCategory === "characters"
                   ? "grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5"
                   : "max-h-[58vh] space-y-3 overflow-y-auto",
@@ -2019,6 +2492,7 @@ function App() {
                   return (
                     <article
                       key={item.id}
+                      data-drop-item-id={item.id}
                       role="button"
                       tabIndex={0}
                       onClick={() => {
@@ -2039,7 +2513,7 @@ function App() {
                       }}
                       className={clsx(
                         "w-full rounded-2xl border border-white/8 bg-white/4 p-4 text-left transition hover:bg-white/8",
-                        activeCategory === "characters" && "min-h-[170px] p-3",
+                        activeCategory === "characters" && "min-h-[138px] p-2.5",
                         isActive && "border-white/25 bg-white/10",
                       )}
                     >
@@ -2049,7 +2523,7 @@ function App() {
                             className={clsx(
                               "relative shrink-0 overflow-hidden rounded-xl border bg-slate-900/60",
                               categoryIconAccent(activeCategory),
-                              activeCategory === "characters" ? "mx-auto h-16 w-16" : "h-16 w-16",
+                              activeCategory === "characters" ? "mx-auto h-12 w-12" : "h-16 w-16",
                             )}
                           >
                             <div className="absolute inset-0 flex h-full w-full items-center justify-center text-xs font-semibold uppercase text-slate-300">
@@ -2080,9 +2554,9 @@ function App() {
 
                           {activeCategory === "characters" ? (
                             <>
-                              <p className="mt-2 text-center text-[13px] font-semibold leading-4 text-white">{item.name}</p>
+                              <p className="mt-1.5 text-center text-[12px] font-semibold leading-4 text-white">{item.name}</p>
                               <p className="mt-1 text-center font-mono text-[10px] text-slate-400">{item.id}</p>
-                              <div className="mt-auto pt-2 text-[11px] text-slate-300">
+                              <div className="mt-auto pt-1.5 text-[10px] text-slate-300">
                                 <div className="flex items-center justify-between">
                                   <span>{item.total_mods} mods</span>
                                   <span>{item.enabled_mods} enabled</span>
@@ -2298,7 +2772,99 @@ function App() {
                     <div className="flex flex-col gap-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                          <p className="text-base font-medium text-white">{mod.display_name}</p>
+                          {renamingModPath === mod.path ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <input
+                                value={renameModInput}
+                                onChange={(event) => {
+                                  setRenameModInput(event.currentTarget.value);
+                                }}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    void handleRenameMod(mod.path);
+                                  }
+                                  if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setRenamingModPath(null);
+                                    setRenameModInput("");
+                                  }
+                                }}
+                                className="min-w-[220px] flex-1 rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-white"
+                                placeholder="Folder name"
+                              />
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleRenameMod(mod.path);
+                                }}
+                                disabled={renameModBusy || !renameModInput.trim()}
+                                className="rounded-xl border border-white/10 bg-white px-3 py-2 text-xs font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                              >
+                                {renameModBusy ? "Saving..." : "Save"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setRenamingModPath(null);
+                                  setRenameModInput("");
+                                }}
+                                className="rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-200 transition hover:bg-white/8"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex items-center gap-2">
+                                <p className="text-base font-medium text-white">{mod.display_name}</p>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setRenamingModPath(mod.path);
+                                    setRenameModInput(mod.display_name);
+                                  }}
+                                  className="rounded-lg border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200 transition hover:bg-white/8"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void handleSyncPersistSwapkeys(mod.path);
+                                  }}
+                                  disabled={syncingPersistPath === mod.path}
+                                  className="rounded-lg border border-cyan-300/28 bg-cyan-400/12 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-400/24 disabled:cursor-wait disabled:opacity-70"
+                                  title="Sync global persist values from d3dx_user.ini for this mod"
+                                >
+                                  {syncingPersistPath === mod.path ? "Saving" : "Safe Mod Toggles"}
+                                </button>
+                              </div>
+                              {persistSyncFeedback[mod.path] ? (
+                                <p
+                                  className={clsx(
+                                    "mt-1 text-[10px]",
+                                    persistSyncFeedback[mod.path].kind === "saved"
+                                      ? "text-emerald-200"
+                                      : persistSyncFeedback[mod.path].kind === "unchanged"
+                                        ? "text-slate-300"
+                                        : "text-rose-200",
+                                  )}
+                                >
+                                  {persistSyncFeedback[mod.path].message}
+                                </p>
+                              ) : null}
+                            </>
+                          )}
                           <p className="mt-2 break-all font-mono text-xs text-slate-400">{mod.path}</p>
                         </div>
                         <span
@@ -2733,9 +3299,64 @@ function App() {
 
           {activeTab === "fixes" ? (
           <aside className={clsx("rounded-[28px] p-6", panelClassName)}>
-            <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
-              <Gamepad2 className="h-4 w-4" />
-              Fixes Panel
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
+                <Gamepad2 className="h-4 w-4" />
+                Fixes Panel
+              </div>
+              <label className="min-w-[220px] rounded-2xl border border-white/8 bg-white/4 p-3">
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Active Game</span>
+                <select
+                  value={highlightedGame}
+                  onChange={(event) => {
+                    void handleGameSelect(event.currentTarget.value as GameKey);
+                    void loadFixes(event.currentTarget.value as GameKey);
+                  }}
+                  className={clsx(
+                    "mt-3 w-full rounded-xl border px-3 py-2 text-sm",
+                    themeMode === "light"
+                      ? "border-slate-300 bg-white text-slate-900"
+                      : "border-white/10 bg-slate-950/60 text-white",
+                  )}
+                  style={
+                    isGameTheme
+                      ? {
+                          borderColor: gameAccentMedium,
+                          backgroundColor: gameAccentSoft,
+                          color: "#eaf6ff",
+                        }
+                      : undefined
+                  }
+                >
+                  {GAME_ORDER.map((gameId) => (
+                    <option key={gameId} value={gameId} style={{ backgroundColor: "#f8fafc", color: "#0f172a" }}>{GAMES[gameId].name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {RABBITFX_URLS[highlightedGame] ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleOpenRabbitFx(highlightedGame);
+                    }}
+                    className="rounded-full border border-white/10 px-4 py-2 text-xs text-slate-200 transition hover:bg-white/8"
+                  >
+                    Open RabbitFX ↗
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleInstallLatestRabbitFx(highlightedGame);
+                    }}
+                    className="rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-xs text-cyan-100 transition hover:bg-cyan-500/30"
+                  >
+                    Install Latest to BufferValues
+                  </button>
+                </>
+              ) : null}
             </div>
             <label className="mt-5 block rounded-2xl border border-white/8 bg-white/4 p-4">
               <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{highlightedGameConfig.name} Script Target</span>
