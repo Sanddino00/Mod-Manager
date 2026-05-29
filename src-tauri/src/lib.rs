@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{LogicalPosition, LogicalSize, Manager, Position, Size};
+use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Position, Size};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -1401,14 +1401,95 @@ fn toggle_mod_folder(path: String) -> Result<String, String> {
         .ok_or_else(|| "Invalid folder name".to_string())?;
 
     let next_name = if let Some(stripped) = folder_name.strip_prefix("DISABLED_") {
-        stripped.to_string()
+        let base = strip_disabled_duplicate_prefix(stripped).to_string();
+        find_available_enabled_name(parent, &base)
     } else {
-        format!("DISABLED_{folder_name}")
+        find_available_disabled_name(parent, folder_name)
     };
 
     let next_path = parent.join(next_name);
     fs::rename(&current_path, &next_path).map_err(|err| err.to_string())?;
     Ok(normalize_path(&next_path))
+}
+
+#[tauri::command]
+fn rename_mod_folder(path: String, new_name: String) -> Result<String, String> {
+    let current_path = PathBuf::from(&path);
+
+    if !current_path.is_dir() {
+        return Err("Mod folder not found".to_string());
+    }
+
+    let parent = current_path
+        .parent()
+        .ok_or_else(|| "Cannot rename root folder".to_string())?;
+    let current_name = current_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid folder name".to_string())?;
+
+    let requested = new_name.trim();
+    if requested.is_empty() {
+        return Err("Folder name cannot be empty".to_string());
+    }
+
+    let sanitized = sanitize_folder_name(requested);
+    let base_name = sanitized
+        .trim_start_matches("DISABLED_")
+        .trim()
+        .to_string();
+    if base_name.is_empty() {
+        return Err("Folder name cannot be empty".to_string());
+    }
+
+    // Preserve current enabled/disabled state while renaming.
+    let next_name = if current_name.starts_with("DISABLED_") {
+        format!("DISABLED_{base_name}")
+    } else {
+        base_name
+    };
+
+    if next_name == current_name {
+        return Ok(normalize_path(&current_path));
+    }
+
+    let next_path = parent.join(&next_name);
+    if next_path.exists() {
+        return Err(format!("A folder named '{next_name}' already exists."));
+    }
+
+    fs::rename(&current_path, &next_path).map_err(|err| err.to_string())?;
+    Ok(normalize_path(&next_path))
+}
+
+#[tauri::command]
+fn webview_eval(
+    app: tauri::AppHandle,
+    label: String,
+    script: String,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Webview '{label}' not found"))?;
+
+    webview.eval(&script).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn emit_web_download_request(
+    app: tauri::AppHandle,
+    source: String,
+    url: String,
+    file_name: Option<String>,
+) -> Result<(), String> {
+    let payload = json!({
+        "source": source,
+        "url": url,
+        "fileName": file_name,
+    });
+
+    app.emit("mod-manager-web-download-request", payload)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1760,6 +1841,51 @@ fn find_assignment<'a>(trimmed: &'a str, name: &'a str) -> Option<&'a str> {
     }
 }
 
+fn strip_disabled_duplicate_prefix(name: &str) -> &str {
+    let mut split = name.splitn(2, '_');
+    let first = split.next().unwrap_or_default();
+    let second = split.next();
+    if !first.is_empty()
+        && first.chars().all(|c| c.is_ascii_digit())
+        && second.is_some()
+    {
+        second.unwrap_or(name)
+    } else {
+        name
+    }
+}
+
+fn find_available_disabled_name(parent: &Path, base_name: &str) -> String {
+    let primary = format!("DISABLED_{base_name}");
+    if !parent.join(&primary).exists() {
+        return primary;
+    }
+
+    let mut index: usize = 1;
+    loop {
+        let candidate = format!("DISABLED_{index}_{base_name}");
+        if !parent.join(&candidate).exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn find_available_enabled_name(parent: &Path, base_name: &str) -> String {
+    if !parent.join(base_name).exists() {
+        return base_name.to_string();
+    }
+
+    let mut index: usize = 1;
+    loop {
+        let candidate = format!("{base_name}_copy{index}");
+        if !parent.join(&candidate).exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
 #[tauri::command]
 fn batch_toggle_mods(item_path: String, enable: bool) -> Result<usize, String> {
     let dir = PathBuf::from(&item_path);
@@ -1783,19 +1909,243 @@ fn batch_toggle_mods(item_path: String, enable: bool) -> Result<usize, String> {
         }
 
         let new_name = if enable {
-            name.trim_start_matches("DISABLED_").to_string()
+            let stripped = name.trim_start_matches("DISABLED_");
+            let base = strip_disabled_duplicate_prefix(stripped);
+            find_available_enabled_name(&dir, base)
         } else {
-            format!("DISABLED_{name}")
+            find_available_disabled_name(&dir, &name)
         };
 
         let new_path = dir.join(&new_name);
-        if new_path.exists() {
-            continue; // skip conflict
-        }
         fs::rename(&path, &new_path).map_err(|e| e.to_string())?;
         changed += 1;
     }
     Ok(changed)
+}
+
+fn find_mods_root(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(node) = current {
+        let is_mods = node
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("mods"))
+            .unwrap_or(false);
+        if is_mods {
+            return Some(node.to_path_buf());
+        }
+        current = node.parent();
+    }
+    None
+}
+
+fn collect_ini_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ini_files_recursive(&path, out)?;
+            continue;
+        }
+        let is_ini = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("ini"))
+            .unwrap_or(false);
+        if is_ini {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn extract_namespace(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((left, right)) = trimmed.split_once('=') {
+            if left.trim().eq_ignore_ascii_case("namespace") {
+                let ns = right.trim();
+                if !ns.is_empty() {
+                    return Some(ns.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_master_swapkeys(content: &str) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut by_path: HashMap<String, String> = HashMap::new();
+    let mut by_namespace: HashMap<String, String> = HashMap::new();
+
+    fn normalize_lhs(lhs: &str) -> String {
+        let mut key = lhs.trim().replace('/', "\\").to_ascii_lowercase();
+        if let Some(stripped) = key.strip_prefix("global ") {
+            key = stripped.trim().to_string();
+        }
+        if let Some(stripped) = key.strip_prefix('$') {
+            key = stripped.to_string();
+        }
+        if let Some(stripped) = key.strip_prefix('\\') {
+            key = stripped.to_string();
+        }
+        key
+    }
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((left, right)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        let key = normalize_lhs(left);
+
+        let value = right
+            .split(|c: char| c.is_whitespace() || c == ';' || c == '#')
+            .find(|part| !part.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            continue;
+        }
+
+        // Namespace-style lookup can work with any normalized assignment key.
+        by_namespace.insert(key.replace('\\', "."), value.clone());
+
+        // Path-style lookup requires the traditional mods\... key prefix.
+        if let Some(suffix) = key.strip_prefix("mods\\") {
+            by_path.insert(suffix.to_string(), value.clone());
+            by_namespace.insert(suffix.replace('\\', "."), value);
+        }
+    }
+
+    (by_path, by_namespace)
+}
+
+#[tauri::command]
+fn sync_global_persist_for_mod(mod_path: String, game_mod_root: Option<String>) -> Result<usize, String> {
+    let mod_dir = PathBuf::from(&mod_path);
+    if !mod_dir.is_dir() {
+        return Err(format!("Mod folder not found: {mod_path}"));
+    }
+
+    let mods_root = if let Some(raw_root) = game_mod_root.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        let root_path = PathBuf::from(raw_root);
+        let is_mods = root_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("mods"))
+            .unwrap_or(false);
+
+        if is_mods {
+            root_path
+        } else {
+            find_mods_root(&root_path)
+                .ok_or_else(|| "Could not resolve selected game Mods folder from mod root.".to_string())?
+        }
+    } else {
+        find_mods_root(&mod_dir)
+            .ok_or_else(|| "Could not find parent Mods folder from selected mod path.".to_string())?
+    };
+    let mods_parent = mods_root
+        .parent()
+        .ok_or_else(|| "Could not determine Mods parent folder.".to_string())?;
+    let master_ini_path = mods_parent.join("d3dx_user.ini");
+    if !master_ini_path.is_file() {
+        return Err(format!(
+            "d3dx_user.ini not found at {}",
+            normalize_path(&master_ini_path)
+        ));
+    }
+
+    let master_content = fs::read_to_string(&master_ini_path).map_err(|err| err.to_string())?;
+    let (mapping_by_path, mapping_by_namespace) = parse_master_swapkeys(&master_content);
+    if mapping_by_path.is_empty() && mapping_by_namespace.is_empty() {
+        return Err("No valid $mods mappings found in d3dx_user.ini".to_string());
+    }
+
+    let mut ini_files: Vec<PathBuf> = Vec::new();
+    collect_ini_files_recursive(&mod_dir, &mut ini_files)?;
+
+    let mut updated_files: usize = 0;
+
+    for ini_path in ini_files {
+        let file_name = ini_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        if file_name.contains("DISABLED") {
+            continue;
+        }
+
+        let raw = fs::read(&ini_path).map_err(|err| err.to_string())?;
+        let content = String::from_utf8_lossy(&raw).into_owned();
+        let namespace = extract_namespace(&content)
+            .map(|ns| ns.replace(['\\', '/'], ".").to_ascii_lowercase());
+
+        let rel_file = ini_path
+            .strip_prefix(&mods_root)
+            .map_err(|err| err.to_string())?
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+
+        let mut changed = false;
+        let mut new_lines: Vec<String> = Vec::new();
+
+        for line in content.lines() {
+            let trimmed_start = line.trim_start();
+            let lower = trimmed_start.to_ascii_lowercase();
+
+            if lower.starts_with("global persist $") {
+                let indent_len = line.len().saturating_sub(trimmed_start.len());
+                let indent = &line[..indent_len];
+                let rest = &trimmed_start["global persist $".len()..];
+
+                if let Some((lhs, rhs)) = rest.split_once('=') {
+                    let swap_key = lhs.trim();
+                    if !swap_key.is_empty() {
+                        let swap_key_lower = swap_key.to_ascii_lowercase();
+                        let lookup = if let Some(ns) = &namespace {
+                            mapping_by_namespace.get(&format!("{ns}.{swap_key_lower}"))
+                        } else {
+                            mapping_by_path.get(&format!("{rel_file}\\{swap_key_lower}"))
+                        };
+
+                        if let Some(new_value) = lookup {
+                            let old_value = rhs
+                                .split(|c: char| c.is_whitespace() || c == ';' || c == '#')
+                                .find(|part| !part.trim().is_empty())
+                                .unwrap_or("")
+                                .trim();
+                            if old_value != new_value {
+                                new_lines.push(format!(
+                                    "{indent}global persist ${swap_key} = {new_value}"
+                                ));
+                                changed = true;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            new_lines.push(line.to_string());
+        }
+
+        if changed {
+            fs::write(&ini_path, new_lines.join("\n")).map_err(|err| err.to_string())?;
+            updated_files += 1;
+        }
+    }
+
+    Ok(updated_files)
 }
 
 fn sanitize_folder_name(value: &str) -> String {
@@ -1890,16 +2240,14 @@ fn download_and_install_mod_blocking(
         return Err("Invalid download URL".to_string());
     }
 
-    let safe_name = sanitize_folder_name(&mod_name);
-
-    let temp_root = std::env::temp_dir().join(format!(
-        "modmgr_{}",
+    let download_root = std::env::temp_dir().join(format!(
+        "modmgr_dl_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0)
     ));
-    fs::create_dir_all(&temp_root).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&download_root).map_err(|err| err.to_string())?;
 
     let url_path = url.split('?').next().unwrap_or(&url);
     let raw_ext = Path::new(url_path)
@@ -1913,10 +2261,7 @@ fn download_and_install_mod_blocking(
         "zip".to_string()
     };
 
-    let archive_path = temp_root.join(format!("download.{ext}"));
-    let extract_dir = temp_root.join("extract");
-    fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
-
+    let archive_path = download_root.join(format!("download.{ext}"));
     let dl_output = background_command("curl.exe")
         .args([
             "-L",
@@ -1929,12 +2274,54 @@ fn download_and_install_mod_blocking(
         .map_err(|err| format!("curl.exe not available: {err}"))?;
 
     if !dl_output.status.success() {
-        let _ = fs::remove_dir_all(&temp_root);
+        let _ = fs::remove_dir_all(&download_root);
         return Err(format!(
             "Download failed: {}",
             String::from_utf8_lossy(&dl_output.stderr)
         ));
     }
+
+    let result = install_archive_mod_blocking(
+        archive_path.to_str().unwrap_or_default().to_string(),
+        dest_item_path,
+        mod_name,
+        preview_url,
+    );
+    let _ = fs::remove_dir_all(&download_root);
+    result
+}
+
+fn install_archive_mod_blocking(
+    archive_path: String,
+    dest_item_path: String,
+    mod_name: String,
+    preview_url: Option<String>,
+) -> Result<DownloadInstallResult, String> {
+    let source_archive = PathBuf::from(&archive_path);
+    if !source_archive.is_file() {
+        return Err(format!("Archive not found: {archive_path}"));
+    }
+
+    let safe_name = sanitize_folder_name(&mod_name);
+
+    let temp_root = std::env::temp_dir().join(format!(
+        "modmgr_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&temp_root).map_err(|err| err.to_string())?;
+
+    let raw_ext = source_archive
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("zip")
+        .to_lowercase();
+    let ext = raw_ext;
+
+    let extract_dir = temp_root.join("extract");
+    fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
 
     let extract_output = if ext == "zip" {
         background_command("powershell")
@@ -1943,22 +2330,28 @@ fn download_and_install_mod_blocking(
                 "-Command",
                 &format!(
                     "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-                    archive_path.display(),
+                    source_archive.display(),
                     extract_dir.display()
                 ),
             ])
             .output()
             .map_err(|err| format!("powershell not available: {err}"))?
-    } else {
+    } else if ext == "rar" || ext == "7z" {
         background_command("7z")
             .args([
                 "x",
-                archive_path.to_str().unwrap_or_default(),
+                source_archive.to_str().unwrap_or_default(),
                 &format!("-o{}", extract_dir.display()),
                 "-y",
             ])
             .output()
             .map_err(|err| format!("7z not available for {ext} archives: {err}"))?
+    } else {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Err(format!(
+            "Unsupported archive extension '{}'. Use zip, 7z, or rar.",
+            ext
+        ));
     };
 
     if !extract_output.status.success() {
@@ -1993,7 +2386,7 @@ fn download_and_install_mod_blocking(
     copy_dir_recursive(&source_path, &dest)?;
     let result = normalize_path(&dest);
 
-    let preview_path = if let Some(preview) = preview_url {
+    let mut preview_path = if let Some(preview) = preview_url {
         let trimmed = preview.trim();
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
             let ext = Path::new(trimmed.split('?').next().unwrap_or(trimmed))
@@ -2025,6 +2418,10 @@ fn download_and_install_mod_blocking(
         None
     };
 
+    if preview_path.is_none() {
+        preview_path = find_mod_preview_images(result.clone()).into_iter().next();
+    }
+
     let _ = fs::remove_dir_all(&temp_root);
     Ok(DownloadInstallResult {
         installed_path: result,
@@ -2042,6 +2439,22 @@ async fn download_and_install_mod(
 ) -> Result<DownloadInstallResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         download_and_install_mod_blocking(url, dest_item_path, mod_name, preview_url)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn install_local_archive_mod(
+    archive_path: String,
+    dest_item_path: String,
+    mod_name: String,
+) -> Result<DownloadInstallResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_archive = archive_path.clone();
+        let installed = install_archive_mod_blocking(archive_path, dest_item_path, mod_name, None)?;
+        let _ = fs::remove_file(source_archive);
+        Ok(installed)
     })
     .await
     .map_err(|err| err.to_string())?
@@ -2739,6 +3152,9 @@ pub fn run() {
             load_game_inventory,
             load_item_mods,
             toggle_mod_folder,
+            rename_mod_folder,
+            webview_eval,
+            emit_web_download_request,
             toggle_item_favorite,
             load_fixes_panel,
             run_fix_script,
@@ -2753,8 +3169,10 @@ pub fn run() {
             ensure_buffer_values_folders,
             create_mod_folder_scaffold,
             download_and_install_mod,
+            install_local_archive_mod,
             save_ini_value,
             batch_toggle_mods,
+            sync_global_persist_for_mod,
             check_for_updates,
             download_and_update_resources,
             download_and_launch_updater,

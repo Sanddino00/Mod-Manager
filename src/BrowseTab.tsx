@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
-import { BROWSE_GAME_DATA, GAMEBANANA_URLS, RABBITFX_URLS } from "./config/games";
+import { BROWSE_GAME_DATA, GAME_ORDER, GAMEBANANA_URLS, GAMES, RABBITFX_URLS } from "./config/games";
 import type { GameKey } from "./types";
 
 interface GbCategory {
@@ -107,9 +107,10 @@ interface Props {
   game: GameKey;
   gameModRoot: string;
   onDownloadEvent?: (payload: DownloadEventPayload) => void;
+  onGameSelect?: (game: GameKey) => void;
 }
 
-export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
+export function BrowseTab({ game, gameModRoot, onDownloadEvent, onGameSelect }: Props) {
   const gameConfig = BROWSE_GAME_DATA[game];
 
   const [activeTypeIdx, setActiveTypeIdx] = useState(0);
@@ -283,6 +284,10 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
       .finally(() => setDetailLoading(false));
   }, [selectedMod?.id]);
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [activeCatId]);
+
   async function handleOpenUrl(url: string) {
     try {
       await openUrl(url);
@@ -382,10 +387,25 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
   }
 
   return (
-    <div className="mt-6 grid gap-4 lg:grid-cols-[200px_minmax(0,1fr)_320px]">
+    <div className="mt-6 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)_400px] lg:items-start">
       {/* Left: type + category */}
-      <aside className="rounded-[28px] border border-white/10 bg-slate-950/50 p-5">
-        <p className="text-[10px] uppercase tracking-[0.28em] text-slate-400">Type</p>
+      <aside className="self-start rounded-[28px] border border-white/10 bg-slate-950/50 p-5 lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:overflow-y-auto">
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-[0.28em] text-slate-400">Active Game</span>
+          <select
+            value={game}
+            onChange={(event) => {
+              onGameSelect?.(event.currentTarget.value as GameKey);
+            }}
+            className="mt-3 w-full rounded-xl border border-white/10 bg-white px-3 py-2 text-sm text-slate-900"
+          >
+            {GAME_ORDER.map((gameId) => (
+              <option key={gameId} value={gameId}>{GAMES[gameId].name}</option>
+            ))}
+          </select>
+        </label>
+
+        <p className="mt-5 text-[10px] uppercase tracking-[0.28em] text-slate-400">Type</p>
         <div className="mt-3 space-y-1">
           {gameConfig.types.map((t, idx) => (
             <button
@@ -453,7 +473,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
           }}
           className="mt-5 w-full rounded-xl border border-white/10 py-2 text-xs text-slate-300 transition hover:bg-white/8"
         >
-          Open GameBanana ↗
+          Open GB Website ↗
         </button>
         {RABBITFX_URLS[game] ? (
           <button
@@ -470,6 +490,9 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
 
       {/* Center: mod cards */}
       <section className="rounded-[28px] border border-white/10 bg-slate-950/50 p-5">
+        <div className="mb-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-300">
+          GameBanana API view: some logged-in-only or age-gated website results may not appear here.
+        </div>
         <div className="flex items-center gap-3">
           <input
             value={pendingSearch}
@@ -509,7 +532,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
           </p>
         ) : null}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3">
           {modsLoading && mods.length === 0 ? (
             <p className="col-span-full text-sm text-slate-400">Loading mods…</p>
           ) : mods.length === 0 ? (
@@ -531,11 +554,11 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
                   <img
                     src={mod.preview}
                     alt={mod.name}
-                    className="mb-3 h-24 w-full rounded-xl object-cover"
+                    className="mb-3 aspect-[4/3] w-full rounded-xl object-cover"
                     loading="lazy"
                   />
                 ) : (
-                  <div className="mb-3 h-24 w-full rounded-xl bg-slate-800/50" />
+                  <div className="mb-3 aspect-[4/3] w-full rounded-xl bg-slate-800/50" />
                 )}
                 <p className="truncate text-sm font-medium text-white">{mod.name}</p>
                 <p className="mt-1 text-xs text-slate-400">by {mod.submitter}</p>
@@ -559,17 +582,17 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
       </section>
 
       {/* Right: detail + install */}
-      <aside className="rounded-[28px] border border-white/10 bg-slate-950/50 p-5">
+      <aside className="self-start rounded-[28px] border border-white/10 bg-slate-950/50 p-5 lg:sticky lg:top-4 lg:h-[78vh] lg:overflow-hidden">
         {selectedMod ? (
-          <>
+          <div className="h-full lg:flex lg:flex-col">
             {selectedMod.preview ? (
               <img
                 src={selectedMod.preview}
                 alt={selectedMod.name}
-                className="mb-4 h-40 w-full rounded-2xl object-cover"
+                className="mb-4 aspect-[16/10] w-full rounded-2xl object-cover"
               />
             ) : (
-              <div className="mb-4 h-40 w-full rounded-2xl bg-slate-800/50" />
+              <div className="mb-4 aspect-[16/10] w-full rounded-2xl bg-slate-800/50" />
             )}
 
             <p className="text-base font-semibold text-white">{selectedMod.name}</p>
@@ -585,53 +608,55 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
               Open Mod Page ↗
             </button>
 
-            <div className="mt-4 max-h-28 overflow-y-auto rounded-2xl border border-white/8 bg-white/4 p-3 text-xs leading-5 text-slate-300/80">
-              {detailLoading ? "Loading…" : (detail?.description || selectedMod.summary || "No description.")}
-            </div>
+            <div className="mt-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+              <div className="rounded-2xl border border-white/8 bg-white/4 p-3 text-sm leading-6 text-slate-300/85">
+                {detailLoading ? "Loading…" : (detail?.description || selectedMod.summary || "No description.")}
+              </div>
 
-            <p className="mt-4 text-[10px] uppercase tracking-[0.2em] text-slate-400">Download Files</p>
-            <div className="mt-2 max-h-40 space-y-2 overflow-y-auto">
-              {detailLoading ? (
-                <p className="text-xs text-slate-400">Loading files…</p>
-              ) : detail?.files.length ? (
-                detail.files.map((file) => (
-                  <div
-                    key={file.id}
-                    className={clsx(
-                      "rounded-2xl border p-3 transition",
-                      selectedFile?.id === file.id ? "border-white/25 bg-white/10" : "border-white/8 bg-white/4",
-                    )}
-                  >
-                    <p className="truncate text-xs font-medium text-white">{file.name}</p>
-                    {file.size > 0 ? (
-                      <p className="mt-0.5 text-[10px] text-slate-400">{(file.size / 1024 / 1024).toFixed(1)} MB</p>
-                    ) : null}
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void handleOpenUrl(file.url);
-                        }}
-                        className="flex-1 rounded-full border border-white/10 py-1 text-xs text-slate-200 transition hover:bg-white/8"
-                      >
-                        Download ↗
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void handleDirectInstall(file);
-                        }}
-                        disabled={downloading}
-                        className="flex-1 rounded-full border border-white/10 bg-white py-1 text-xs font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-60"
-                      >
-                        {downloading && selectedFile?.id === file.id ? "Installing…" : "Install"}
-                      </button>
+              <p className="mt-4 text-[10px] uppercase tracking-[0.2em] text-slate-400">Download Files</p>
+              <div className="mt-2 max-h-44 space-y-2 overflow-y-auto">
+                {detailLoading ? (
+                  <p className="text-xs text-slate-400">Loading files…</p>
+                ) : detail?.files.length ? (
+                  detail.files.map((file) => (
+                    <div
+                      key={file.id}
+                      className={clsx(
+                        "rounded-2xl border p-3 transition",
+                        selectedFile?.id === file.id ? "border-white/25 bg-white/10" : "border-white/8 bg-white/4",
+                      )}
+                    >
+                      <p className="truncate text-xs font-medium text-white">{file.name}</p>
+                      {file.size > 0 ? (
+                        <p className="mt-0.5 text-[10px] text-slate-400">{(file.size / 1024 / 1024).toFixed(1)} MB</p>
+                      ) : null}
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleOpenUrl(file.url);
+                          }}
+                          className="flex-1 rounded-full border border-white/10 py-1 text-xs text-slate-200 transition hover:bg-white/8"
+                        >
+                          Download ↗
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleDirectInstall(file);
+                          }}
+                          disabled={downloading}
+                          className="flex-1 rounded-full border border-white/10 bg-white py-1 text-xs font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {downloading && selectedFile?.id === file.id ? "Installing…" : "Install"}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-xs text-slate-400">No direct files. Open the mod page to download.</p>
-              )}
+                  ))
+                ) : (
+                  <p className="text-xs text-slate-400">No direct files. Open the mod page to download.</p>
+                )}
+              </div>
             </div>
 
             {downloadError ? (
@@ -641,7 +666,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent }: Props) {
             ) : null}
 
             {/* Install actions are handled directly per file above. */}
-          </>
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-slate-400">Select a mod to see details.</p>
