@@ -29,6 +29,7 @@ export interface GameDefinition {
 
 export interface Settings {
   mod_paths: Record<GameKey, string>;
+  nextcloud_links: Record<GameKey, string>;
   theme: string;
   script_targets: Record<string, string>;
   version: string;

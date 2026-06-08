@@ -6,7 +6,7 @@ import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/
 import { Webview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
-import { ChevronDown, ExternalLink, KeyRound, Link2, RefreshCw } from "lucide-react";
+import { ChevronDown, Download, ExternalLink, KeyRound, Link2, RefreshCw } from "lucide-react";
 import { ARCA_GAMES, ARCA_URLS, GAMES, type ArcaGameKey } from "./config/games";
 import type { DownloadEventPayload } from "./BrowseTab";
 
@@ -119,7 +119,10 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
   const [webviewReady, setWebviewReady] = useState(false);
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [localInstallStatus, setLocalInstallStatus] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
+  const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
   const panelRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<Webview | null>(null);
 
@@ -168,6 +171,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
       const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
       onDownloadEvent?.({
         kind: "start",
+        source: "arca",
         id: requestId,
         modName,
         fileName,
@@ -187,6 +191,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
 
         onDownloadEvent?.({
           kind: "success",
+          source: "arca",
           id: requestId,
           modName,
           fileName,
@@ -199,6 +204,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
         setDownloadError(message);
         onDownloadEvent?.({
           kind: "error",
+          source: "arca",
           id: requestId,
           modName,
           fileName,
@@ -217,6 +223,92 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
     setBrowserUrl(activeArcaUrl);
     setNativeError(null);
   }, [activeArcaUrl]);
+
+  useEffect(() => {
+    void invoke<string>("get_default_downloads_folder")
+      .then((path) => {
+        if (path.trim()) {
+          setDownloadsFolder(path);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleInstallDownloadedArchive = useCallback(async () => {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Select downloaded archive",
+      defaultPath: downloadsFolder,
+      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar"] }],
+    });
+
+    if (!picked) {
+      return;
+    }
+
+    const archivePath = Array.isArray(picked) ? (picked[0] ?? "") : picked;
+    if (!archivePath) {
+      return;
+    }
+
+    const destination = await pickInstallDestination();
+    if (!destination) {
+      return;
+    }
+
+    const fileName = archivePath.split(/[\\/]/).pop()?.trim() || "download.zip";
+    const modName = deriveModName(fileName);
+    const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+    onDownloadEvent?.({
+      kind: "start",
+      source: "arca",
+      id: requestId,
+      modName,
+      fileName,
+      destinationPath: destination,
+    });
+
+    setInstallingLocalArchive(true);
+    setDownloadError(null);
+    setLocalInstallStatus(null);
+
+    try {
+      const result = await invoke<DownloadInstallResult>("install_local_archive_mod", {
+        archivePath,
+        destItemPath: destination,
+        modName,
+      });
+
+      onDownloadEvent?.({
+        kind: "success",
+        source: "arca",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: result.destination_path,
+        installedPath: result.installed_path,
+        previewPath: result.preview_path,
+      });
+
+      setLocalInstallStatus(`Installed ${fileName} from local download.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDownloadError(message);
+      onDownloadEvent?.({
+        kind: "error",
+        source: "arca",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: destination,
+        message,
+      });
+    } finally {
+      setInstallingLocalArchive(false);
+    }
+  }, [downloadsFolder, onDownloadEvent, pickInstallDestination]);
 
   const runWebviewScript = useCallback(
     async (script: string) => {
@@ -268,19 +360,15 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
       setWebviewReady(false);
       setNativeError(null);
 
-      const current = webviewRef.current;
-      if (current) {
-        await current.close().catch(() => {});
-        webviewRef.current = null;
-      }
-
       const existing = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
-      if (existing) {
-        await existing.close().catch(() => {});
-      }
 
       if (disposed) {
         return;
+      }
+
+      if (existing) {
+        webviewRef.current = existing;
+        setWebviewReady(true);
       }
 
       const rect = host.getBoundingClientRect();
@@ -289,33 +377,36 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
       const x = Math.max(0, Math.round(rect.left));
       const y = Math.max(0, Math.round(rect.top));
 
-      const webview = new Webview(getCurrentWindow(), ARCA_WEBVIEW_LABEL, {
-        url: browserUrl,
-        x,
-        y,
-        width,
-        height,
-        focus: false,
-        dataDirectory: "arca-profile",
-      });
+      const webview = existing
+        ?? new Webview(getCurrentWindow(), ARCA_WEBVIEW_LABEL, {
+          url: browserUrl,
+          x,
+          y,
+          width,
+          height,
+          focus: false,
+          dataDirectory: "arca-profile",
+        });
 
       webviewRef.current = webview;
 
-      void webview.once("tauri://created", () => {
-        if (disposed) {
-          return;
-        }
-        setWebviewReady(true);
-        void syncWebviewBounds(webview).catch(() => {});
-      });
+      if (!existing) {
+        void webview.once("tauri://created", () => {
+          if (disposed) {
+            return;
+          }
+          setWebviewReady(true);
+          void syncWebviewBounds(webview).catch(() => {});
+        });
 
-      void webview.once("tauri://error", (event) => {
-        if (disposed) {
-          return;
-        }
-        setWebviewReady(false);
-        setNativeError(String(event.payload));
-      });
+        void webview.once("tauri://error", (event) => {
+          if (disposed) {
+            return;
+          }
+          setWebviewReady(false);
+          setNativeError(String(event.payload));
+        });
+      }
 
       const sync = () => {
         if (!disposed && webviewRef.current) {
@@ -365,12 +456,11 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
         if (cleanup) {
           cleanup();
         }
-        void current.close().catch(() => {});
+        void Promise.all([
+          current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
+          current.setSize(new LogicalSize(1, 1)).catch(() => {}),
+        ]).catch(() => {});
       }
-
-      void Webview.getByLabel(ARCA_WEBVIEW_LABEL)
-        .then((view) => view?.close().catch(() => {}))
-        .catch(() => {});
     };
   }, [canUseNativeWebview, syncWebviewBounds]);
 
@@ -645,6 +735,17 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
               <button
                 type="button"
                 onClick={() => {
+                  void handleInstallDownloadedArchive();
+                }}
+                disabled={installingLocalArchive}
+                className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-500/18 px-4 py-2 text-sm font-medium text-amber-100 transition hover:bg-amber-500/28 disabled:cursor-wait disabled:opacity-70"
+              >
+                <Download className="h-4 w-4" />
+                {installingLocalArchive ? "Installing..." : "Install Downloaded File"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   void handleOpenExternal(addressInput || activeArcaUrl);
                 }}
                 className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/12"
@@ -788,6 +889,9 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
           ) : null}
           {downloadError ? (
             <p className="mt-2 text-xs text-rose-200/90">Download install failed: {downloadError}</p>
+          ) : null}
+          {localInstallStatus ? (
+            <p className="mt-2 text-xs text-emerald-200/90">{localInstallStatus}</p>
           ) : null}
         </article>
 

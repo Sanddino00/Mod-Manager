@@ -44,3 +44,7 @@ ehthumbs.db
 legacy_versions
 legacy_versions/resources.zip
 legacy_versions/OldVersions/
+
+# Local scratch and manual release staging
+tmp/
+releases/

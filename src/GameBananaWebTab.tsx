@@ -65,6 +65,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
   const [localInstallStatus, setLocalInstallStatus] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
+  const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
 
   const panelRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<Webview | null>(null);
@@ -111,6 +112,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
       onDownloadEvent?.({
         kind: "start",
+        source: "gamebanana",
         id: requestId,
         modName,
         fileName,
@@ -130,6 +132,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
 
         onDownloadEvent?.({
           kind: "success",
+          source: "gamebanana",
           id: requestId,
           modName,
           fileName,
@@ -142,6 +145,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
         setDownloadError(message);
         onDownloadEvent?.({
           kind: "error",
+          source: "gamebanana",
           id: requestId,
           modName,
           fileName,
@@ -160,6 +164,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       multiple: false,
       directory: false,
       title: "Select downloaded archive",
+      defaultPath: downloadsFolder,
       filters: [{ name: "Archives", extensions: ["zip", "7z", "rar"] }],
     });
 
@@ -183,6 +188,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
 
     onDownloadEvent?.({
       kind: "start",
+      source: "gamebanana",
       id: requestId,
       modName,
       fileName,
@@ -202,6 +208,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
 
       onDownloadEvent?.({
         kind: "success",
+        source: "gamebanana",
         id: requestId,
         modName,
         fileName,
@@ -216,6 +223,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       setDownloadError(message);
       onDownloadEvent?.({
         kind: "error",
+        source: "gamebanana",
         id: requestId,
         modName,
         fileName,
@@ -225,11 +233,21 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
     } finally {
       setInstallingLocalArchive(false);
     }
-  }, [onDownloadEvent, pickInstallDestination]);
+  }, [downloadsFolder, onDownloadEvent, pickInstallDestination]);
 
   useEffect(() => {
     setSelectedGame(game);
   }, [game]);
+
+  useEffect(() => {
+    void invoke<string>("get_default_downloads_folder")
+      .then((path) => {
+        if (path.trim()) {
+          setDownloadsFolder(path);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const nextUrl = GAMEBANANA_URLS[selectedGame];
@@ -287,19 +305,14 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       setWebviewReady(false);
       setNativeError(null);
 
-      const current = webviewRef.current;
-      if (current) {
-        await current.close().catch(() => {});
-        webviewRef.current = null;
-      }
-
       const existing = await Webview.getByLabel(GB_WEBVIEW_LABEL).catch(() => null);
-      if (existing) {
-        await existing.close().catch(() => {});
-      }
-
       if (disposed) {
         return;
+      }
+
+      if (existing) {
+        webviewRef.current = existing;
+        setWebviewReady(true);
       }
 
       const rect = host.getBoundingClientRect();
@@ -308,33 +321,36 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       const x = Math.max(0, Math.round(rect.left));
       const y = Math.max(0, Math.round(rect.top));
 
-      const webview = new Webview(getCurrentWindow(), GB_WEBVIEW_LABEL, {
-        url: browserUrl,
-        x,
-        y,
-        width,
-        height,
-        focus: false,
-        dataDirectory: "gb-profile",
-      });
+      const webview = existing
+        ?? new Webview(getCurrentWindow(), GB_WEBVIEW_LABEL, {
+          url: browserUrl,
+          x,
+          y,
+          width,
+          height,
+          focus: false,
+          dataDirectory: "gb-profile",
+        });
 
       webviewRef.current = webview;
 
-      void webview.once("tauri://created", () => {
-        if (disposed) {
-          return;
-        }
-        setWebviewReady(true);
-        void syncWebviewBounds(webview).catch(() => {});
-      });
+      if (!existing) {
+        void webview.once("tauri://created", () => {
+          if (disposed) {
+            return;
+          }
+          setWebviewReady(true);
+          void syncWebviewBounds(webview).catch(() => {});
+        });
 
-      void webview.once("tauri://error", (event) => {
-        if (disposed) {
-          return;
-        }
-        setWebviewReady(false);
-        setNativeError(String(event.payload));
-      });
+        void webview.once("tauri://error", (event) => {
+          if (disposed) {
+            return;
+          }
+          setWebviewReady(false);
+          setNativeError(String(event.payload));
+        });
+      }
 
       const sync = () => {
         if (!disposed && webviewRef.current) {
@@ -384,14 +400,13 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
         if (cleanup) {
           cleanup();
         }
-        void current.close().catch(() => {});
+        void Promise.all([
+          current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
+          current.setSize(new LogicalSize(1, 1)).catch(() => {}),
+        ]).catch(() => {});
       }
-
-      void Webview.getByLabel(GB_WEBVIEW_LABEL)
-        .then((view) => view?.close().catch(() => {}))
-        .catch(() => {});
     };
-  }, [browserUrl, canUseNativeWebview, syncWebviewBounds]);
+  }, [canUseNativeWebview, syncWebviewBounds]);
 
   useEffect(() => {
     if (!canUseNativeWebview || !webviewRef.current) {

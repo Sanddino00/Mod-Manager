@@ -42,7 +42,7 @@
         <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
 
 
-        <Icon Id="ProductIcon" SourceFile="$(sys.SOURCEFILEDIR)..\..\resources\icon.ico"/>
+        <Icon Id="ProductIcon" SourceFile="$(sys.SOURCEFILEDIR)..\..\..\..\icons\icon.ico"/>
         <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
         <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
         <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
@@ -90,6 +90,10 @@
             <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
                 <Directory Id="INSTALLDIR" Name="mod-manager-v2"/>
             </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="mod-manager-v2" />
+            </Directory>
+            <Directory Id="DesktopFolder" Name="Desktop" />
         </Directory>
 
         <DirectoryRef Id="INSTALLDIR">
@@ -105,7 +109,35 @@
 <Component Id="updater" Guid="ee80ccd9-30a6-4ef3-b50d-3737f93851c1" Win64="$(var.Win64)">
                 <File Id="Bin_updater" Source="$(sys.SOURCEFILEDIR)..\..\updater.exe" KeyPath="yes"/>
             </Component>
-            <Component Id="I2fdcc9523de24d118d47b12e789af51d" Guid="8fc80df3-ba2f-4e51-b1ba-edcb849d582b" Win64="$(var.Win64)" KeyPath="yes"><File Id="PathFile_I2fdcc9523de24d118d47b12e789af51d" Source="$(sys.SOURCEFILEDIR)..\..\mod_manager_v2_lib.dll" /></Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="StartMenuShortcut" Guid="*">
+                <Shortcut
+                    Id="ApplicationStartMenuShortcut"
+                    Name="mod-manager-v2"
+                    Description="Launch mod-manager-v2"
+                    Target="[INSTALLDIR]mod-manager-v2.exe"
+                    WorkingDirectory="INSTALLDIR"
+                    Icon="ProductIcon"
+                    IconIndex="0" />
+                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="DesktopFolder">
+            <Component Id="DesktopShortcut" Guid="*">
+                <Shortcut
+                    Id="ApplicationDesktopShortcut"
+                    Name="mod-manager-v2"
+                    Description="Launch mod-manager-v2"
+                    Target="[INSTALLDIR]mod-manager-v2.exe"
+                    WorkingDirectory="INSTALLDIR"
+                    Icon="ProductIcon"
+                    IconIndex="0" />
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
         </DirectoryRef>
 
 <Feature
@@ -120,12 +152,12 @@
 
             <ComponentRef Id="RegistryEntries"/>
 
-<ComponentRef Id="I2fdcc9523de24d118d47b12e789af51d"/>
-
             <Feature Id="ShortcutsFeature"
                 Title="Shortcuts"
                 Level="1">
                 <ComponentRef Id="Path"/>
+                <ComponentRef Id="StartMenuShortcut"/>
+                <ComponentRef Id="DesktopShortcut"/>
             </Feature>
 
             <Feature

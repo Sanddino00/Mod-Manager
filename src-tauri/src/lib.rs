@@ -6,8 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Position, Size};
-
+use tauri::{image::Image, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -19,7 +18,7 @@ const APP_RELEASES_API: &str = "https://api.github.com/repos/Sanddino00/Mod-Mana
 const RESOURCES_RELEASES_API: &str =
     "https://api.github.com/repos/Sanddino00/Resources-for-Fixmanager-and-Modmanager/releases/latest";
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 struct LegacyInstall {
     base_dir: String,
     resources_dir: String,
@@ -169,6 +168,75 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn local_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn install_path_file_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("install_path.json"));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("install_path.json"));
+        }
+    }
+
+    if let Some(base) = get_appdata_base() {
+        candidates.push(base.join("install_path.json"));
+    }
+
+    candidates
+}
+
+fn read_install_path_document() -> Option<(PathBuf, Value)> {
+    for candidate in install_path_file_candidates() {
+        let raw = fs::read_to_string(&candidate).ok()?;
+        let value = serde_json::from_str::<Value>(&raw).ok()?;
+        return Some((candidate, value));
+    }
+    None
+}
+
+fn write_install_path_document(body: &Value) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(body).map_err(|err| err.to_string())?;
+
+    let candidate = install_path_file_candidates()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("install_path.json"));
+
+    if let Some(parent) = candidate.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+
+    fs::write(&candidate, &serialized).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn write_install_path_file(install_base: &Path) -> Result<(), String> {
+    let mut body = read_install_path_document()
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    if !body.is_object() {
+        body = Value::Object(Map::new());
+    }
+
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "install_path".to_string(),
+            Value::String(normalize_path(install_base)),
+        );
+    }
+
+    write_install_path_document(&body)?;
+
+    Ok(())
+}
+
 fn background_command(program: &str) -> Command {
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -176,35 +244,6 @@ fn background_command(program: &str) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
-}
-
-fn local_path(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
-
-fn download_to_path(url: &str, dest: &Path) -> Result<(), String> {
-    let status = background_command("curl")
-        .args(["-L", "--fail", "-o", local_path(dest).as_str(), url])
-        .status()
-        .map_err(|err| err.to_string())?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Download failed: {url}"))
-    }
-}
-
-fn write_install_path_file(install_base: &Path) -> Result<(), String> {
-    let install_path_file = install_base.join("install_path.json");
-    let body = json!({
-        "install_path": normalize_path(install_base),
-    });
-    fs::write(
-        &install_path_file,
-        serde_json::to_string_pretty(&body).map_err(|err| err.to_string())?,
-    )
-    .map_err(|err| err.to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -276,6 +315,7 @@ fn read_install_path_from_file(path: &Path) -> Option<PathBuf> {
     }
     Some(PathBuf::from(install_path))
 }
+
 
 fn local_install_base() -> Option<PathBuf> {
     let mut candidates = Vec::new();
@@ -1031,6 +1071,13 @@ fn default_settings(base_dir: &Path) -> Value {
 
     json!({
         "mod_paths": default_mod_paths(base_dir),
+        "nextcloud_links": {
+            "gi": "",
+            "hsr": "",
+            "wuwa": "",
+            "zzz": "",
+            "end": ""
+        },
         "theme": "dark",
         "script_targets": {},
         "version": detect_resource_version(&resources_dir),
@@ -2161,22 +2208,160 @@ fn sanitize_folder_name(value: &str) -> String {
     }
 }
 
+fn sanitize_file_name(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "download.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn download_to_path(url: &str, destination: &Path) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("Invalid download URL".to_string());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+
+    let output = background_command("curl")
+        .args([
+            "-L",
+            "--fail",
+            "-o",
+            destination.to_str().unwrap_or_default(),
+            url,
+        ])
+        .output()
+        .map_err(|err| format!("curl not available: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(())
+}
+
+fn default_downloads_folder() -> Option<PathBuf> {
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let downloads = PathBuf::from(user_profile).join("Downloads");
+        return Some(downloads);
+    }
+    None
+}
+
 #[tauri::command]
-fn ensure_buffer_values_folders(mod_paths: Value) -> Result<(), String> {
+fn get_default_downloads_folder() -> Result<String, String> {
+    let folder = default_downloads_folder()
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "Unable to determine default folder".to_string())?;
+    Ok(normalize_path(&folder))
+}
+
+#[tauri::command]
+fn default_downloads_dir() -> Result<String, String> {
+    get_default_downloads_folder()
+}
+
+#[tauri::command]
+fn download_file_to_folder(
+    url: String,
+    dest_folder: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    let trimmed_url = url.trim();
+    if !trimmed_url.starts_with("https://") && !trimmed_url.starts_with("http://") {
+        return Err("Invalid download URL".to_string());
+    }
+
+    let destination_dir = PathBuf::from(dest_folder.trim());
+    fs::create_dir_all(&destination_dir).map_err(|err| err.to_string())?;
+
+    let derived_name = file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let path_part = trimmed_url.split('?').next().unwrap_or(trimmed_url);
+            Path::new(path_part)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        })
+        .unwrap_or_else(|| "download.bin".to_string());
+
+    let safe_name = sanitize_file_name(&derived_name);
+    let mut destination_file = destination_dir.join(&safe_name);
+    let mut idx: u32 = 1;
+    while destination_file.exists() {
+        let stem = Path::new(&safe_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download");
+        let ext = Path::new(&safe_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let next_name = if ext.is_empty() {
+            format!("{stem}_copy{idx}")
+        } else {
+            format!("{stem}_copy{idx}.{ext}")
+        };
+        destination_file = destination_dir.join(next_name);
+        idx += 1;
+    }
+
+    let output = background_command("curl.exe")
+        .args([
+            "-L",
+            "--fail",
+            "-o",
+            destination_file.to_str().unwrap_or_default(),
+            trimmed_url,
+        ])
+        .output()
+        .map_err(|err| format!("curl.exe not available: {err}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(normalize_path(&destination_file))
+}
+
+#[tauri::command]
+fn ensure_buffer_values_folders(mod_paths: Value) -> Result<Vec<String>, String> {
+    let mut created_for: Vec<String> = Vec::new();
     if let Value::Object(paths) = &mod_paths {
-        for (_game, path_val) in paths {
+        for (game, path_val) in paths {
             if let Some(path_str) = path_val.as_str() {
                 if !path_str.is_empty() {
                     let parent = PathBuf::from(path_str);
                     if parent.is_dir() {
                         let bv = parent.join("BufferValues");
-                        let _ = fs::create_dir_all(&bv);
+                        if !bv.exists() {
+                            fs::create_dir_all(&bv).map_err(|err| err.to_string())?;
+                            created_for.push(game.clone());
+                        }
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(created_for)
 }
 
 #[tauri::command]
@@ -2323,7 +2508,102 @@ fn install_archive_mod_blocking(
     let extract_dir = temp_root.join("extract");
     fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
 
-    let extract_output = if ext == "zip" {
+    fn run_external_extractor(program: &Path, archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+        let program_str = program.to_string_lossy().to_string();
+        background_command(&program_str)
+            .args([
+                "x",
+                archive.to_str().unwrap_or_default(),
+                &format!("-o{}", out_dir.to_string_lossy()),
+                "-y",
+            ])
+            .output()
+            .map_err(|err| err.to_string())
+    }
+
+    fn run_winrar_extractor(program: &Path, archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+        let program_str = program.to_string_lossy().to_string();
+        let mut out_arg = out_dir.to_string_lossy().to_string();
+        if !out_arg.ends_with('\\') && !out_arg.ends_with('/') {
+            out_arg.push('\\');
+        }
+        background_command(&program_str)
+            .args([
+                "x",
+                "-ibck",
+                "-y",
+                archive.to_str().unwrap_or_default(),
+                &out_arg,
+            ])
+            .output()
+            .map_err(|err| err.to_string())
+    }
+
+    fn extract_with_7z_or_winrar(archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+        let mut candidates: Vec<PathBuf> = vec![
+            PathBuf::from("7z"),
+            PathBuf::from("7z.exe"),
+            PathBuf::from("7zz"),
+            PathBuf::from("7zz.exe"),
+            PathBuf::from("7zr"),
+            PathBuf::from("7zr.exe"),
+            PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files\WinRAR\UnRAR.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\WinRAR\UnRAR.exe"),
+        ];
+
+        let winrar_candidates = vec![
+            PathBuf::from(r"C:\Program Files\WinRAR\WinRAR.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\WinRAR\WinRAR.exe"),
+        ];
+
+        candidates.extend(winrar_candidates.iter().cloned());
+
+        let mut saw_spawn_error = false;
+        let mut last_output: Option<std::process::Output> = None;
+
+        for candidate in candidates {
+            let is_winrar = candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("winrar.exe"));
+
+            let result = if is_winrar {
+                run_winrar_extractor(&candidate, archive, out_dir)
+            } else {
+                run_external_extractor(&candidate, archive, out_dir)
+            };
+
+            match result {
+                Ok(output) => {
+                    if output.status.success() {
+                        return Ok(output);
+                    }
+                    last_output = Some(output);
+                }
+                Err(err) => {
+                    if err.contains("program not found") || err.contains("cannot find the file") {
+                        saw_spawn_error = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        if let Some(output) = last_output {
+            return Ok(output);
+        }
+
+        if saw_spawn_error {
+            Err("No archive extractor found (7-Zip/WinRAR). Install 7-Zip or add it to PATH.".to_string())
+        } else {
+            Err("No working archive extractor found.".to_string())
+        }
+    }
+
+    let run_expand_archive = || {
         background_command("powershell")
             .args([
                 "-NoProfile",
@@ -2335,23 +2615,29 @@ fn install_archive_mod_blocking(
                 ),
             ])
             .output()
-            .map_err(|err| format!("powershell not available: {err}"))?
-    } else if ext == "rar" || ext == "7z" {
-        background_command("7z")
-            .args([
-                "x",
-                source_archive.to_str().unwrap_or_default(),
-                &format!("-o{}", extract_dir.display()),
-                "-y",
-            ])
-            .output()
-            .map_err(|err| format!("7z not available for {ext} archives: {err}"))?
+            .map_err(|err| format!("powershell not available: {err}"))
+    };
+
+    let extract_output = if ext == "zip" {
+        match run_expand_archive() {
+            Ok(output) if output.status.success() => output,
+            _ => extract_with_7z_or_winrar(&source_archive, &extract_dir)
+                .map_err(|err| format!("Extractor unavailable for zip archive: {err}"))?,
+        }
     } else {
-        let _ = fs::remove_dir_all(&temp_root);
-        return Err(format!(
-            "Unsupported archive extension '{}'. Use zip, 7z, or rar.",
-            ext
-        ));
+        match extract_with_7z_or_winrar(&source_archive, &extract_dir) {
+            Ok(output) => output,
+            Err(extract_err) => match run_expand_archive() {
+                Ok(zip_output) => zip_output,
+                Err(_) => {
+                    let _ = fs::remove_dir_all(&temp_root);
+                    return Err(format!(
+                        "Unsupported or unreadable archive '{}': {}",
+                        ext, extract_err
+                    ));
+                }
+            },
+        }
     };
 
     if !extract_output.status.success() {
@@ -2459,6 +2745,7 @@ async fn install_local_archive_mod(
     .await
     .map_err(|err| err.to_string())?
 }
+
 
 #[tauri::command]
 fn open_in_explorer(path: String) -> Result<(), String> {
@@ -3119,6 +3406,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
+                if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/icon.ico")) {
+                    let _ = window.set_icon(icon);
+                }
+
                 if let Ok(settings) = load_settings_snapshot() {
                     let width = settings
                         .get("window_width")
@@ -3166,6 +3457,9 @@ pub fn run() {
             find_mod_preview_images,
             load_image_data_url,
             load_images_data_urls,
+            get_default_downloads_folder,
+            default_downloads_dir,
+            download_file_to_folder,
             ensure_buffer_values_folders,
             create_mod_folder_scaffold,
             download_and_install_mod,

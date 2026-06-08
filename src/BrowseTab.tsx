@@ -40,6 +40,7 @@ interface DownloadInstallResult {
 
 export interface DownloadEventPayload {
   kind: "start" | "success" | "error";
+  source?: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "manager";
   id: string;
   modName: string;
   fileName: string;
@@ -344,6 +345,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent, onGameSelect }: 
     const requestId = `${Date.now()}-${file.id}`;
     onDownloadEvent?.({
       kind: "start",
+      source: "mod-browser",
       id: requestId,
       modName: selectedMod.name,
       fileName: file.name,
@@ -363,6 +365,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent, onGameSelect }: 
 
       onDownloadEvent?.({
         kind: "success",
+        source: "mod-browser",
         id: requestId,
         modName: selectedMod.name,
         fileName: file.name,
@@ -375,6 +378,7 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent, onGameSelect }: 
       setDownloadError(message);
       onDownloadEvent?.({
         kind: "error",
+        source: "mod-browser",
         id: requestId,
         modName: selectedMod.name,
         fileName: file.name,

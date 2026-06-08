@@ -32,6 +32,7 @@ import { BrowseTab } from "./BrowseTab";
 import type { DownloadEventPayload } from "./BrowseTab";
 import { ArcaTab } from "./ArcaTab";
 import { GameBananaWebTab } from "./GameBananaWebTab";
+import { NextcloudTab } from "./NextcloudTab";
 import type {
   BootstrapState,
   CategoryKey,
@@ -49,6 +50,7 @@ type ThemeMode = "dark" | "light" | "game";
 
 type DownloadRecord = {
   id: string;
+  source: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "manager";
   status: "downloading" | "done" | "error";
   modName: string;
   fileName: string;
@@ -127,6 +129,10 @@ const GAME_CARD_IDENTITIES: Record<GameKey, GameCardIdentity> = {
     badge: "Frontier Green",
   },
 };
+
+const TEXFX_URL = "https://gamebanana.com/mods/485763";
+const ORFIX_URL = "https://github.com/leotorrez/LeoTools/blob/main/releases/ORFix.ini";
+const ORFIX_API_URL = "https://github.com/leotorrez/LeoTools/blob/main/releases/ORFixAPI.ini";
 
 function normalizeTheme(value: string | null | undefined): ThemeMode {
   if (value === "light" || value === "game") {
@@ -330,6 +336,15 @@ function parseGameBananaModId(url: string): string | null {
   return match?.[1] ?? null;
 }
 
+function toRawGithubUrl(url: string): string {
+  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/i);
+  if (!match) {
+    return url;
+  }
+  const [, owner, repo, path] = match;
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${path}`;
+}
+
 async function fetchGameBananaJson(endpoint: string): Promise<unknown> {
   const response = await fetch(`https://gamebanana.com/apiv11/${endpoint}`, {
     headers: { Accept: "application/json" },
@@ -435,7 +450,7 @@ function App() {
   const [renameModBusy, setRenameModBusy] = useState(false);
   const [favoriteItemId, setFavoriteItemId] = useState<string | null>(null);
   const [runningFix, setRunningFix] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"manager" | "browse" | "gbweb" | "arca" | "settings" | "fixes" | "downloads">("manager");
+  const [activeTab, setActiveTab] = useState<"manager" | "browse" | "gbweb" | "arca" | "nextcloud" | "settings" | "fixes" | "downloads">("manager");
   const [importSource, setImportSource] = useState("");
   const [importingMod, setImportingMod] = useState(false);
   const [addCharId, setAddCharId] = useState("");
@@ -753,7 +768,15 @@ function App() {
         }, {}),
       );
       if (nextState.settings.mod_paths) {
-        invoke("ensure_buffer_values_folders", { modPaths: nextState.settings.mod_paths }).catch(() => {});
+        const created = await invoke<string[]>("ensure_buffer_values_folders", {
+          modPaths: nextState.settings.mod_paths ?? {},
+        }).catch(() => []);
+        if (created.length > 0) {
+          const names = created
+            .map((key) => (key in GAMES ? GAMES[key as GameKey].name : key.toUpperCase()))
+            .join(", ");
+          setSaveMessage(`Created missing BufferValues folders for: ${names}.`);
+        }
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -897,6 +920,79 @@ function App() {
         destinationPath,
         message,
       });
+    } finally {
+      setFixesLoading(false);
+    }
+  }
+
+  async function handleInstallGiOrfixTexFx() {
+    const gameId: GameKey = "gi";
+    const modRoot = persistedSettings?.mod_paths[gameId]?.trim() ?? "";
+    if (!modRoot) {
+      setScanError(`No mod root configured for ${GAMES[gameId].name}.`);
+      return;
+    }
+
+    const bufferValuesRoot = `${modRoot.replace(/[\\/]+$/, "")}/BufferValues`;
+    setFixesLoading(true);
+    setScanError(null);
+
+    try {
+      const texfxModId = parseGameBananaModId(TEXFX_URL);
+      if (!texfxModId) {
+        throw new Error("Could not determine TexFx mod id.");
+      }
+
+      const payload = await fetchGameBananaJson(`Mod/${texfxModId}/ProfilePage`);
+      const files = extractGameBananaFiles(payload);
+      const mainFile = files.find((entry) => entry.isMain) ?? files[0];
+      if (!mainFile?.url) {
+        throw new Error("No downloadable TexFx file was found.");
+      }
+
+      const texfxRequestId = `texfx-gi-${Date.now()}`;
+      handleDownloadEvent({
+        kind: "start",
+        id: texfxRequestId,
+        modName: "TexFx",
+        fileName: mainFile.name,
+        destinationPath: bufferValuesRoot,
+      });
+
+      const texfxResult = await invoke<{ installed_path: string; destination_path: string; preview_path: string | null }>("download_and_install_mod", {
+        url: mainFile.url,
+        destItemPath: bufferValuesRoot,
+        modName: "TexFx",
+        previewUrl: mainFile.preview,
+      });
+
+      handleDownloadEvent({
+        kind: "success",
+        id: texfxRequestId,
+        modName: "TexFx",
+        fileName: mainFile.name,
+        destinationPath: texfxResult.destination_path,
+        installedPath: texfxResult.installed_path,
+        previewPath: texfxResult.preview_path,
+      });
+
+      const orfixSavedPath = await invoke<string>("download_file_to_folder", {
+        url: toRawGithubUrl(ORFIX_URL),
+        destFolder: bufferValuesRoot,
+        fileName: "ORFix.ini",
+      });
+
+      const orfixApiSavedPath = await invoke<string>("download_file_to_folder", {
+        url: toRawGithubUrl(ORFIX_API_URL),
+        destFolder: bufferValuesRoot,
+        fileName: "ORFixAPI.ini",
+      });
+
+      setSaveMessage(`Installed TexFx, ORFix.ini, and ORFixAPI.ini to ${bufferValuesRoot}.`);
+      void orfixSavedPath;
+      void orfixApiSavedPath;
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : String(err));
     } finally {
       setFixesLoading(false);
     }
@@ -1790,12 +1886,20 @@ function App() {
   }
 
   function handleDownloadEvent(payload: DownloadEventPayload) {
+    const source = payload.source ?? "manager";
+    const resolvedStatus: DownloadRecord["status"] = payload.kind === "success"
+      ? "done"
+      : payload.kind === "error"
+        ? "error"
+        : "downloading";
+
     if (payload.kind === "start") {
       setLastDownloadFolder(payload.destinationPath);
       setDownloadRecords((current) => [
         {
           id: payload.id,
-          status: "downloading",
+          source,
+          status: resolvedStatus,
           modName: payload.modName,
           fileName: payload.fileName,
           destinationPath: payload.destinationPath,
@@ -1806,22 +1910,46 @@ function App() {
       return;
     }
 
-    setDownloadRecords((current) =>
-      current.map((entry) => {
+    setDownloadRecords((current) => {
+      let found = false;
+      const next = current.map((entry) => {
         if (entry.id !== payload.id) {
           return entry;
         }
+        found = true;
         return {
           ...entry,
-          status: payload.kind === "success" ? "done" : "error",
+          source: entry.source ?? source,
+          status: resolvedStatus,
           destinationPath: payload.destinationPath,
           installedPath: payload.installedPath ?? entry.installedPath,
           previewPath: payload.previewPath ?? entry.previewPath,
           message: payload.message,
           finishedAt: Date.now(),
         };
-      }),
-    );
+      });
+
+      if (found) {
+        return next;
+      }
+
+      return [
+        {
+          id: payload.id,
+          source,
+          status: resolvedStatus,
+          modName: payload.modName,
+          fileName: payload.fileName,
+          destinationPath: payload.destinationPath,
+          installedPath: payload.installedPath,
+          previewPath: payload.previewPath,
+          message: payload.message,
+          startedAt: Date.now(),
+          finishedAt: Date.now(),
+        },
+        ...next,
+      ];
+    });
   }
 
   function renderGameCard(gameId: GameKey) {
@@ -2031,6 +2159,22 @@ function App() {
             >
               <Globe className="h-4 w-4" />
               Arca
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("nextcloud");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "nextcloud"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "nextcloud" ? navActiveStyle : navIdleStyle}
+            >
+              <Globe className="h-4 w-4" />
+              Nextcloud
             </button>
             <button
               type="button"
@@ -2350,6 +2494,22 @@ function App() {
           <ArcaTab
             gameModRoot={currentModRoot}
             onDownloadEvent={handleDownloadEvent}
+          />
+        ) : activeTab === "nextcloud" ? (
+          <NextcloudTab
+            game={highlightedGame}
+            gameModRoot={currentModRoot}
+            onDownloadEvent={handleDownloadEvent}
+            links={draftSettings?.nextcloud_links ?? persistedSettings?.nextcloud_links ?? {
+              gi: "",
+              hsr: "",
+              wuwa: "",
+              zzz: "",
+              end: "",
+            }}
+            onGameSelect={(gameId) => {
+              void handleGameSelect(gameId);
+            }}
           />
         ) : (
           <>
@@ -3186,6 +3346,29 @@ function App() {
               ))}
             </div>
 
+            <div className="mt-4 grid gap-4">
+              {GAME_ORDER.map((gameId) => (
+                <label key={`nextcloud-${gameId}`} className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                  <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Nextcloud Shared Link</span>
+                  <input
+                    value={draftSettings?.nextcloud_links?.[gameId] ?? ""}
+                    onChange={(event) => {
+                      const nextLink = event.currentTarget.value;
+                      updateDraftSettings((current) => ({
+                        ...current,
+                        nextcloud_links: {
+                          ...(current.nextcloud_links ?? { gi: "", hsr: "", wuwa: "", zzz: "", end: "" }),
+                          [gameId]: nextLink,
+                        },
+                      }));
+                    }}
+                    placeholder="https://nextcloud.example.com/s/..."
+                    className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white"
+                  />
+                </label>
+              ))}
+            </div>
+
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -3235,7 +3418,7 @@ function App() {
             </div>
 
             <p className="mt-3 text-sm text-slate-300/80">
-              Active and completed downloads for this app session. This list resets when the app is closed.
+              Active and completed downloads for this app session from Mod-Browser, GameBanana, Arca, and Nextcloud. This list resets when the app is closed.
             </p>
 
             <div className="mt-4 space-y-3">
@@ -3250,6 +3433,7 @@ function App() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-white">{entry.modName}</p>
                         <p className="mt-1 text-xs text-slate-400">{entry.fileName}</p>
+                        <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">{entry.source}</p>
                         <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{entry.destinationPath}</p>
                       </div>
                       <span
@@ -3353,11 +3537,30 @@ function App() {
                     }}
                     className="rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-xs text-cyan-100 transition hover:bg-cyan-500/30"
                   >
-                    Install Latest to BufferValues
+                    {`Install RabbitFX for ${GAMES[highlightedGame].name}`}
                   </button>
                 </>
               ) : null}
+              {highlightedGame === "gi" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleInstallGiOrfixTexFx();
+                  }}
+                  className="rounded-full border border-emerald-300/30 bg-emerald-500/20 px-4 py-2 text-xs text-emerald-100 transition hover:bg-emerald-500/30"
+                >
+                  Install ORFix + TexFx for Genshin
+                </button>
+              ) : null}
             </div>
+            <p className="mt-2 text-xs text-slate-300/80">
+              Installs the latest RabbitFX main file into BufferValues for the selected game, and disables older RabbitFX folders first to avoid duplicate active versions.
+            </p>
+            {highlightedGame === "gi" ? (
+              <p className="mt-1 text-xs text-slate-300/80">
+                ORFix + TexFx downloads TexFx from GameBanana and ORFix/ORFixAPI ini files from LeoTools, then saves them into Genshin BufferValues.
+              </p>
+            ) : null}
             <label className="mt-5 block rounded-2xl border border-white/8 bg-white/4 p-4">
               <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{highlightedGameConfig.name} Script Target</span>
               <div className="mt-3 flex gap-2">
