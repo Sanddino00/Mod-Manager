@@ -6,15 +6,17 @@ Features:
 
 -Toggle Key editor per mod
 
--Mod downloads of gb with auto preview download
+-Mod downloads of gamebanana with auto preview download
 
 -Mod-Fix managment / use 
 
--Downloading RabbitFx (Planned to add TeFx and Orfix)
+-Downloading RabbitFx/TexFx and Orfix(API)
 
 -Drag and drop to add mods
 
--toggle choice save (globalpersist)
+-toggle choice save (globalpersist) and rename funktion
+
+-Integration for Nextcloud incase you host your own cloud (uses public share links) 
 
 
 Included Fixes:
