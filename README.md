@@ -1,4 +1,4 @@
-Modmanagee with integrated management for mod-fixes and gamebanana downloads
+Modmanagee with integrated management for mod-fixes and gamebanana, arca.live and nextcloud downloads
 
 Features:
 --
@@ -16,9 +16,12 @@ Features:
 
 -toggle choice save (globalpersist) and rename funktion
 
--Integration for Nextcloud incase you host your own cloud (uses public share links) 
+-Integration for Nextcloud downloading incase you host your own cloud (uses public share links) 
 
+-Creation of a folder structure inside of the mod folder
 
+Setup Stuff:
+-
 Included Fixes:
 --
 -Swap key saver all games
