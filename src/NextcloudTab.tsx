@@ -21,6 +21,7 @@ type Props = {
   game: GameKey;
   gameModRoot: string;
   links: Record<GameKey, string>;
+  rememberWebSessions?: boolean;
   onDownloadEvent?: (payload: DownloadEventPayload) => void;
   onGameSelect?: (game: GameKey) => void;
 };
@@ -66,7 +67,7 @@ function normalizeUrl(input: string): string {
   return `https://${trimmed}`;
 }
 
-export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGameSelect }: Props) {
+export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = true, onDownloadEvent, onGameSelect }: Props) {
   const [selectedGame, setSelectedGame] = useState<GameKey>(game);
   const [browserUrl, setBrowserUrl] = useState(normalizeUrl(links[game] ?? ""));
   const [addressInput, setAddressInput] = useState(normalizeUrl(links[game] ?? ""));
@@ -78,6 +79,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
   const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
   const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
+  const [sessionProfileId] = useState(() => `nextcloud-profile-temp-${Date.now()}-${Math.floor(Math.random() * 10000)}`);
 
   const panelRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<Webview | null>(null);
@@ -362,7 +364,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
         width,
         height,
         focus: false,
-        dataDirectory: "nextcloud-profile",
+        dataDirectory: rememberWebSessions ? "nextcloud-profile" : sessionProfileId,
       });
 
       webviewRef.current = webview;
@@ -431,14 +433,23 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
         if (cleanup) {
           cleanup();
         }
-        void current.close().catch(() => {});
+        if (rememberWebSessions) {
+          void Promise.all([
+            current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
+            current.setSize(new LogicalSize(1, 1)).catch(() => {}),
+          ]).catch(() => {});
+        } else {
+          void current.close().catch(() => {});
+        }
       }
 
-      void Webview.getByLabel(NEXTCLOUD_WEBVIEW_LABEL)
-        .then((view) => view?.close().catch(() => {}))
-        .catch(() => {});
+      if (!rememberWebSessions) {
+        void Webview.getByLabel(NEXTCLOUD_WEBVIEW_LABEL)
+          .then((view) => view?.close().catch(() => {}))
+          .catch(() => {});
+      }
     };
-  }, [browserUrl, canUseNativeWebview, syncWebviewBounds]);
+  }, [browserUrl, canUseNativeWebview, rememberWebSessions, sessionProfileId, syncWebviewBounds]);
 
   useEffect(() => {
     if (!canUseNativeWebview || !webviewRef.current || !browserUrl) {

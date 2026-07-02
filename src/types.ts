@@ -30,10 +30,14 @@ export interface GameDefinition {
 export interface Settings {
   mod_paths: Record<GameKey, string>;
   nextcloud_links: Record<GameKey, string>;
+  nextcloud_side_link: string;
   theme: string;
   script_targets: Record<string, string>;
   version: string;
   auto_check_updates: boolean;
+  remember_web_sessions: boolean;
+  enable_login_helper_hints: boolean;
+  enable_web_adblocker: boolean;
   last_release_tag: string | null;
   install_path_info: string | null;
   last_selected_game: GameKey;

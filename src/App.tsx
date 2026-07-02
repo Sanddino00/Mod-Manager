@@ -14,6 +14,8 @@ import {
   Globe,
   HardDriveDownload,
   Layers3,
+  Link2,
+  MessageCircle,
   RefreshCw,
   Save,
   Settings2,
@@ -31,6 +33,7 @@ import { SetupWizard } from "./SetupWizard";
 import { BrowseTab } from "./BrowseTab";
 import type { DownloadEventPayload } from "./BrowseTab";
 import { ArcaTab } from "./ArcaTab";
+import { DiscordTab } from "./DiscordTab";
 import { GameBananaWebTab } from "./GameBananaWebTab";
 import { NextcloudTab } from "./NextcloudTab";
 import type {
@@ -418,6 +421,9 @@ function extractGameBananaFiles(payload: unknown): {
 }
 
 function App() {
+  type PrimaryTab = "manager" | "browse" | "downloads" | "modding-sites" | "discord" | "nextcloud-side" | "fixes" | "settings";
+  type ModdingSiteTab = "gbweb" | "arca" | "nextcloud";
+
   const [state, setState] = useState<BootstrapState | null>(null);
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [activeGame, setActiveGame] = useState<GameKey | null>(null);
@@ -451,7 +457,8 @@ function App() {
   const [renameModBusy, setRenameModBusy] = useState(false);
   const [favoriteItemId, setFavoriteItemId] = useState<string | null>(null);
   const [runningFix, setRunningFix] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"manager" | "browse" | "gbweb" | "arca" | "nextcloud" | "settings" | "fixes" | "downloads">("manager");
+  const [activeTab, setActiveTab] = useState<PrimaryTab>("manager");
+  const [activeModdingSiteTab, setActiveModdingSiteTab] = useState<ModdingSiteTab>("gbweb");
   const [importSource, setImportSource] = useState("");
   const [importingMod, setImportingMod] = useState(false);
   const [addCharId, setAddCharId] = useState("");
@@ -503,6 +510,9 @@ function App() {
   useEffect(() => { activeCategoryRef.current = activeCategory; }, [activeCategory]);
 
   const persistedSettings = state?.settings ?? null;
+  const rememberWebSessions = Boolean(draftSettings?.remember_web_sessions ?? persistedSettings?.remember_web_sessions ?? true);
+  const enableLoginHelperHints = Boolean(draftSettings?.enable_login_helper_hints ?? persistedSettings?.enable_login_helper_hints ?? true);
+  const enableWebAdblocker = Boolean(draftSettings?.enable_web_adblocker ?? persistedSettings?.enable_web_adblocker ?? true);
   const highlightedGame = activeGame ?? persistedSettings?.last_selected_game ?? "gi";
   const highlightedGameConfig = GAMES[highlightedGame];
   const activeGameTheme = GAME_THEME_SKINS[highlightedGame];
@@ -2205,6 +2215,54 @@ function App() {
             <button
               type="button"
               onClick={() => {
+                setActiveTab("modding-sites");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "modding-sites"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "modding-sites" ? navActiveStyle : navIdleStyle}
+            >
+              <Globe className="h-4 w-4" />
+              Modding Sides
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("discord");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "discord"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "discord" ? navActiveStyle : navIdleStyle}
+            >
+              <MessageCircle className="h-4 w-4" />
+              Discord
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("nextcloud-side");
+              }}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "nextcloud-side"
+                  ? navActiveClassName
+                  : navIdleClassName,
+              )}
+              style={activeTab === "nextcloud-side" ? navActiveStyle : navIdleStyle}
+            >
+              <Link2 className="h-4 w-4" />
+              Nexcloud Side
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 setActiveTab("fixes");
               }}
               className={clsx(
@@ -2217,54 +2275,6 @@ function App() {
             >
               <Gamepad2 className="h-4 w-4" />
               Fix Manager
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("gbweb");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "gbweb"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "gbweb" ? navActiveStyle : navIdleStyle}
-            >
-              <Globe className="h-4 w-4" />
-              GameBanana
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("arca");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "arca"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "arca" ? navActiveStyle : navIdleStyle}
-            >
-              <Globe className="h-4 w-4" />
-              Arca
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("nextcloud");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "nextcloud"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "nextcloud" ? navActiveStyle : navIdleStyle}
-            >
-              <Globe className="h-4 w-4" />
-              Nextcloud
             </button>
             <button
               type="button"
@@ -2571,42 +2581,124 @@ function App() {
               void handleGameSelect(gameId);
             }}
           />
-        ) : activeTab === "gbweb" ? (
-          <GameBananaWebTab
-            game={highlightedGame}
-            gameModRoot={currentModRoot}
-            onDownloadEvent={handleDownloadEvent}
-            onGameSelect={(gameId) => {
-              void handleGameSelect(gameId);
-            }}
-          />
-        ) : activeTab === "arca" ? (
-          <ArcaTab
-            gameModRoot={currentModRoot}
-            onDownloadEvent={handleDownloadEvent}
-          />
-        ) : activeTab === "nextcloud" ? (
+        ) : activeTab === "modding-sites" ? (
+          <section className="mt-4 space-y-4">
+            <div className={clsx("rounded-[24px] p-4", panelClassName)}>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveModdingSiteTab("gbweb");
+                  }}
+                  className={clsx(
+                    "rounded-2xl border px-4 py-4 text-sm font-semibold transition",
+                    activeModdingSiteTab === "gbweb"
+                      ? "border-cyan-300/45 bg-cyan-500/20 text-cyan-100"
+                      : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
+                  )}
+                >
+                  GameBanana
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveModdingSiteTab("arca");
+                  }}
+                  className={clsx(
+                    "rounded-2xl border px-4 py-4 text-sm font-semibold transition",
+                    activeModdingSiteTab === "arca"
+                      ? "border-cyan-300/45 bg-cyan-500/20 text-cyan-100"
+                      : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
+                  )}
+                >
+                  Arca
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveModdingSiteTab("nextcloud");
+                  }}
+                  className={clsx(
+                    "rounded-2xl border px-4 py-4 text-sm font-semibold transition",
+                    activeModdingSiteTab === "nextcloud"
+                      ? "border-cyan-300/45 bg-cyan-500/20 text-cyan-100"
+                      : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
+                  )}
+                >
+                  Nextcloud Public Share
+                </button>
+              </div>
+            </div>
+
+            {activeModdingSiteTab === "gbweb" ? (
+              <GameBananaWebTab
+                game={highlightedGame}
+                gameModRoot={currentModRoot}
+                rememberWebSessions={rememberWebSessions}
+                enableLoginHelperHints={enableLoginHelperHints}
+                enableAdBlocker={enableWebAdblocker}
+                onDownloadEvent={handleDownloadEvent}
+                onGameSelect={(gameId) => {
+                  void handleGameSelect(gameId);
+                }}
+              />
+            ) : activeModdingSiteTab === "arca" ? (
+              <ArcaTab
+                gameModRoot={currentModRoot}
+                rememberWebSessions={rememberWebSessions}
+                enableLoginHelperHints={enableLoginHelperHints}
+                enableAdBlocker={enableWebAdblocker}
+                onDownloadEvent={handleDownloadEvent}
+              />
+            ) : (
+              <NextcloudTab
+                game={highlightedGame}
+                gameModRoot={currentModRoot}
+                rememberWebSessions={rememberWebSessions}
+                onDownloadEvent={handleDownloadEvent}
+                links={draftSettings?.nextcloud_links ?? persistedSettings?.nextcloud_links ?? {
+                  gi: "",
+                  hsr: "",
+                  wuwa: "",
+                  zzz: "",
+                  end: "",
+                }}
+                onGameSelect={(gameId) => {
+                  void handleGameSelect(gameId);
+                }}
+              />
+            )}
+          </section>
+        ) : activeTab === "nextcloud-side" ? (
           <NextcloudTab
             game={highlightedGame}
             gameModRoot={currentModRoot}
+            rememberWebSessions={rememberWebSessions}
             onDownloadEvent={handleDownloadEvent}
-            links={draftSettings?.nextcloud_links ?? persistedSettings?.nextcloud_links ?? {
-              gi: "",
-              hsr: "",
-              wuwa: "",
-              zzz: "",
-              end: "",
-            }}
+            links={(() => {
+              const sideLink = draftSettings?.nextcloud_side_link
+                ?? persistedSettings?.nextcloud_side_link
+                ?? "";
+              return {
+                gi: sideLink,
+                hsr: sideLink,
+                wuwa: sideLink,
+                zzz: sideLink,
+                end: sideLink,
+              };
+            })()}
             onGameSelect={(gameId) => {
               void handleGameSelect(gameId);
             }}
           />
+        ) : activeTab === "discord" ? (
+          <DiscordTab rememberWebSessions={rememberWebSessions} />
         ) : (
           <>
 
         {activeTab === "manager" ? (
         <>
-        <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{GAME_ORDER.map(renderGameCard)}</section>
+        <section className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">{GAME_ORDER.map(renderGameCard)}</section>
 
         <section
           className={clsx(
@@ -2731,7 +2823,7 @@ function App() {
               className={clsx(
                 "mt-2 overflow-x-hidden pr-1",
                 activeCategory === "characters"
-                  ? "grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5"
+                  ? "grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
                   : "max-h-[58vh] space-y-3 overflow-y-auto",
               )}
             >
@@ -3334,11 +3426,51 @@ function App() {
         <section className="mt-6 grid items-start gap-4">
           {activeTab === "settings" ? (
           <section className={clsx("rounded-[28px] p-6", panelClassName)}>
-            <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
-              <Settings2 className="h-4 w-4" />
-              Settings Editor
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
+                <Settings2 className="h-4 w-4" />
+                Settings Editor
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleSaveSettings();
+                  }}
+                  disabled={!draftSettings || savingSettings}
+                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <Save className="h-4 w-4" />
+                  {savingSettings ? "Saving..." : "Save Settings"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleCreateAllMissingFolders();
+                  }}
+                  disabled={savingSettings}
+                  className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/30 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <FolderTree className="h-4 w-4" />
+                  {savingSettings ? "Creating missing folders..." : "Create Missing Folders"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleInstallerSetup();
+                  }}
+                  disabled={savingSettings}
+                  className="inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <Download className="h-4 w-4" />
+                  {savingSettings ? "Running install setup..." : "Install/Repair Setup"}
+                </button>
+              </div>
             </div>
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+
+            {saveMessage ? <p className="mt-3 text-sm text-slate-300">{saveMessage}</p> : null}
+
+            <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
                 <span className="text-xs uppercase tracking-[0.2em] text-slate-400">App Version</span>
                 <p className="mt-3 text-sm text-white">{state?.app_version ?? "—"}</p>
@@ -3384,7 +3516,7 @@ function App() {
                 </select>
               </label>
 
-              <label className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2">
+              <label className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
                 <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Update & Interaction</span>
                 <div className="mt-3 space-y-2 text-sm text-slate-200">
                   <label className="flex items-center gap-2">
@@ -3409,11 +3541,44 @@ function App() {
                     />
                     Right-click toggles mods
                   </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.remember_web_sessions)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, remember_web_sessions: nextValue }));
+                      }}
+                    />
+                    Remember web sessions/login cookies (faster sign-in)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.enable_login_helper_hints)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, enable_login_helper_hints: nextValue }));
+                      }}
+                    />
+                    Enable login helper hints in web tabs
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.enable_web_adblocker)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, enable_web_adblocker: nextValue }));
+                      }}
+                    />
+                    Enable built-in basic ad/tracker blocking for web tabs
+                  </label>
                 </div>
               </label>
             </div>
 
-            <div className="mt-4 grid gap-4">
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {GAME_ORDER.map((gameId) => (
                 <label key={gameId} className="rounded-2xl border border-white/8 bg-white/4 p-4">
                   <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Mod Path</span>
@@ -3456,10 +3621,10 @@ function App() {
               ))}
             </div>
 
-            <div className="mt-4 grid gap-4">
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {GAME_ORDER.map((gameId) => (
                 <label key={`nextcloud-${gameId}`} className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                  <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Nextcloud Shared Link</span>
+                  <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Nextcloud Public Share Link</span>
                   <input
                     value={draftSettings?.nextcloud_links?.[gameId] ?? ""}
                     onChange={(event) => {
@@ -3479,42 +3644,21 @@ function App() {
               ))}
             </div>
 
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  void handleSaveSettings();
+            <label className="mt-4 block rounded-2xl border border-white/8 bg-white/4 p-4">
+              <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Nextcloud Side Global Link</span>
+              <input
+                value={draftSettings?.nextcloud_side_link ?? ""}
+                onChange={(event) => {
+                  const nextLink = event.currentTarget.value;
+                  updateDraftSettings((current) => ({
+                    ...current,
+                    nextcloud_side_link: nextLink,
+                  }));
                 }}
-                disabled={!draftSettings || savingSettings}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
-              >
-                <Save className="h-4 w-4" />
-                {savingSettings ? "Saving..." : "Save Settings"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void handleInstallerSetup();
-                }}
-                disabled={savingSettings}
-                className="inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-wait disabled:opacity-70"
-              >
-                <Download className="h-4 w-4" />
-                {savingSettings ? "Running install setup..." : "Install/Repair Setup"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void handleCreateAllMissingFolders();
-                }}
-                disabled={savingSettings}
-                className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/30 disabled:cursor-wait disabled:opacity-70"
-              >
-                <FolderTree className="h-4 w-4" />
-                {savingSettings ? "Creating missing folders..." : "Create Missing Folders"}
-              </button>
-              {saveMessage ? <p className="text-sm text-slate-300">{saveMessage}</p> : null}
-            </div>
+                placeholder="https://nextcloud.example.com/s/..."
+                className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white"
+              />
+            </label>
           </section>
           ) : null}
 

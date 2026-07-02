@@ -29,6 +29,9 @@ type WebDownloadRequestPayload = {
 
 interface Props {
   gameModRoot: string;
+  rememberWebSessions?: boolean;
+  enableLoginHelperHints?: boolean;
+  enableAdBlocker?: boolean;
   onDownloadEvent?: (payload: DownloadEventPayload) => void;
 }
 
@@ -108,7 +111,13 @@ function isLikelyDownloadUrl(url: string): boolean {
   return /\/dl\/|download|attachment/i.test(url) || /\.(zip|7z|rar|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
 }
 
-export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
+export function ArcaTab({
+  gameModRoot,
+  rememberWebSessions = true,
+  enableLoginHelperHints = true,
+  enableAdBlocker = true,
+  onDownloadEvent,
+}: Props) {
   const [selectedGame, setSelectedGame] = useState<ArcaGameKey>("gi");
   const [channel, setChannel] = useState<ChannelMode>("normal");
   const [encodedLink, setEncodedLink] = useState("");
@@ -123,6 +132,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
   const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
+  const [sessionProfileId] = useState(() => `arca-profile-temp-${Date.now()}-${Math.floor(Math.random() * 10000)}`);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<Webview | null>(null);
 
@@ -379,7 +389,11 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
       setWebviewReady(false);
       setNativeError(null);
 
-      const existing = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
+      let existing = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
+      if (!rememberWebSessions && existing) {
+        await existing.close().catch(() => {});
+        existing = null;
+      }
 
       if (disposed) {
         return;
@@ -404,7 +418,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
           width,
           height,
           focus: false,
-          dataDirectory: "arca-profile",
+          dataDirectory: rememberWebSessions ? "arca-profile" : sessionProfileId,
         });
 
       webviewRef.current = webview;
@@ -475,13 +489,23 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
         if (cleanup) {
           cleanup();
         }
-        void Promise.all([
-          current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
-          current.setSize(new LogicalSize(1, 1)).catch(() => {}),
-        ]).catch(() => {});
+        if (rememberWebSessions) {
+          void Promise.all([
+            current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
+            current.setSize(new LogicalSize(1, 1)).catch(() => {}),
+          ]).catch(() => {});
+        } else {
+          void current.close().catch(() => {});
+        }
+      }
+
+      if (!rememberWebSessions) {
+        void Webview.getByLabel(ARCA_WEBVIEW_LABEL)
+          .then((view) => view?.close().catch(() => {}))
+          .catch(() => {});
       }
     };
-  }, [canUseNativeWebview, syncWebviewBounds]);
+  }, [canUseNativeWebview, rememberWebSessions, sessionProfileId, syncWebviewBounds]);
 
   useEffect(() => {
     if (!canUseNativeWebview || !webviewRef.current) {
@@ -676,6 +700,99 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
       window.clearInterval(intervalId);
     };
   }, [canUseNativeWebview, runWebviewScript]);
+
+  useEffect(() => {
+    if (!canUseNativeWebview || !webviewRef.current) {
+      return;
+    }
+
+    const adblockScript = `(() => {
+      try {
+        const enabled = ${enableAdBlocker ? "true" : "false"};
+        const STYLE_ID = 'mm-basic-adblock-style';
+        const existingStyle = document.getElementById(STYLE_ID);
+
+        if (!enabled) {
+          if (existingStyle) {
+            existingStyle.remove();
+          }
+          return;
+        }
+
+        let styleEl = existingStyle;
+        if (!styleEl) {
+          styleEl = document.createElement('style');
+          styleEl.id = STYLE_ID;
+          document.documentElement.appendChild(styleEl);
+        }
+
+        styleEl.textContent = '.adsbygoogle,iframe[src*="doubleclick"],iframe[src*="googlesyndication"],[id*="sponsor" i],[class*="sponsor" i],[aria-label*="advert" i],[class*="banner-ad" i],[id^="google_ads"] { display:none !important; visibility:hidden !important; pointer-events:none !important; }';
+
+        if ((window).__mmBasicAdblockInstalled) {
+          return;
+        }
+        (window).__mmBasicAdblockInstalled = true;
+
+        const blockedHosts = ['doubleclick.net', 'googlesyndication.com', 'adservice.google.com', 'googletagmanager.com', 'taboola.com', 'outbrain.com', 'adnxs.com', 'criteo.com'];
+
+        const shouldBlock = (rawUrl) => {
+          try {
+            const parsed = new URL(String(rawUrl || ''), window.location.href);
+            const host = (parsed.hostname || '').toLowerCase();
+            return blockedHosts.some((entry) => host === entry || host.endsWith('.' + entry));
+          } catch {
+            return false;
+          }
+        };
+
+        const originalOpen = window.open ? window.open.bind(window) : null;
+        if (originalOpen) {
+          window.open = function(url, target, features) {
+            if (enabled && shouldBlock(url)) {
+              return null;
+            }
+            return originalOpen(url, target, features);
+          };
+        }
+
+        if (window.fetch) {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = function(input, init) {
+            const requestUrl = typeof input === 'string' ? input : (input && input.url) || '';
+            if (enabled && shouldBlock(requestUrl)) {
+              return Promise.reject(new Error('Blocked by basic adblock'));
+            }
+            return originalFetch(input, init);
+          };
+        }
+
+        const originalXhrOpen = XMLHttpRequest.prototype.open;
+        const originalXhrSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          this.__mmAdUrl = url;
+          return originalXhrOpen.call(this, method, url, ...rest);
+        };
+        XMLHttpRequest.prototype.send = function(...args) {
+          if (enabled && shouldBlock(this.__mmAdUrl || '')) {
+            return;
+          }
+          return originalXhrSend.apply(this, args);
+        };
+      } catch {
+        // Ignore adblock injection failures.
+      }
+    })();`;
+
+    const intervalId = window.setInterval(() => {
+      void runWebviewScript(adblockScript).catch(() => {});
+    }, 1600);
+
+    void runWebviewScript(adblockScript).catch(() => {});
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [canUseNativeWebview, enableAdBlocker, runWebviewScript]);
 
   async function handleOpenExternal(url: string) {
     await openUrl(url).catch(() => {
@@ -965,6 +1082,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
             </div>
           </details>
 
+          {enableLoginHelperHints ? (
           <details className="rounded-[20px] border border-white/10 bg-slate-950/35 p-4">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-slate-300">
               <span className="inline-flex items-center gap-2">
@@ -984,6 +1102,7 @@ export function ArcaTab({ gameModRoot, onDownloadEvent }: Props) {
               ))}
             </div>
           </details>
+          ) : null}
         </aside>
       </div>
     </section>
