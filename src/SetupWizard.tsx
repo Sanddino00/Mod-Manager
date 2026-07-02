@@ -175,7 +175,18 @@ export function SetupWizard({ state, onComplete }: Props) {
 
         <div className={clsx(PANEL, "p-6")}>
           {/* Step indicators */}
-          <StepBar current={step} />
+          <div className="flex items-center justify-between gap-3">
+            <StepBar current={step} />
+            {step !== "done" ? (
+              <button
+                type="button"
+                onClick={onComplete}
+                className={clsx(BTN_SECONDARY, "shrink-0")}
+              >
+                Skip Setup
+              </button>
+            ) : null}
+          </div>
 
           <div className="mt-8">
             {step === "welcome" && (

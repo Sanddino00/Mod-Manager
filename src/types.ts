@@ -160,3 +160,14 @@ export interface ModDetailSummary {
   ini_path: string | null;
   toggles: IniToggleEntry[];
 }
+
+export type PreviewImageExtension = "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif";
+
+export const PREVIEW_IMAGE_EXTENSIONS: PreviewImageExtension[] = [
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "bmp",
+  "gif",
+];

@@ -96,6 +96,22 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
     return Array.isArray(picked) ? picked[0] ?? null : picked;
   }, [gameModRoot]);
 
+  const pickOptionalPreviewImage = useCallback(async (): Promise<string | null> => {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Optional: Select preview image (Cancel to skip)",
+      defaultPath: downloadsFolder,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif"] }],
+    });
+
+    if (!picked) {
+      return null;
+    }
+
+    return Array.isArray(picked) ? picked[0] ?? null : picked;
+  }, [downloadsFolder]);
+
   const handleManagedDownload = useCallback(
     async (url: string, preferredName?: string) => {
       if (!url || !isLikelyDownloadUrl(url)) {
@@ -108,6 +124,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
       if (!destination) {
         return;
       }
+      const previewImage = await pickOptionalPreviewImage();
 
       const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
       onDownloadEvent?.({
@@ -127,7 +144,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
           url,
           destItemPath: destination,
           modName,
-          previewUrl: null,
+          previewUrl: previewImage,
         });
 
         onDownloadEvent?.({
@@ -156,7 +173,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
         setDownloading(false);
       }
     },
-    [onDownloadEvent, pickInstallDestination],
+    [onDownloadEvent, pickInstallDestination, pickOptionalPreviewImage],
   );
 
   const handleInstallDownloadedArchive = useCallback(async () => {
@@ -181,6 +198,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
     if (!destination) {
       return;
     }
+    const previewImage = await pickOptionalPreviewImage();
 
     const fileName = archivePath.split(/[\\/]/).pop()?.trim() || "download.zip";
     const modName = deriveModName(fileName);
@@ -204,6 +222,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
         archivePath,
         destItemPath: destination,
         modName,
+        previewUrl: previewImage,
       });
 
       onDownloadEvent?.({
@@ -233,7 +252,7 @@ export function GameBananaWebTab({ game, gameModRoot, onDownloadEvent, onGameSel
     } finally {
       setInstallingLocalArchive(false);
     }
-  }, [downloadsFolder, onDownloadEvent, pickInstallDestination]);
+  }, [downloadsFolder, onDownloadEvent, pickInstallDestination, pickOptionalPreviewImage]);
 
   useEffect(() => {
     setSelectedGame(game);

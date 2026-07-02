@@ -445,6 +445,7 @@ function App() {
   const [togglePath, setTogglePath] = useState<string | null>(null);
   const [renamingModPath, setRenamingModPath] = useState<string | null>(null);
   const [syncingPersistPath, setSyncingPersistPath] = useState<string | null>(null);
+  const [previewCopyingPath, setPreviewCopyingPath] = useState<string | null>(null);
   const [persistSyncFeedback, setPersistSyncFeedback] = useState<Record<string, { message: string; kind: "saved" | "unchanged" | "error" }>>({});
   const [renameModInput, setRenameModInput] = useState("");
   const [renameModBusy, setRenameModBusy] = useState(false);
@@ -459,6 +460,7 @@ function App() {
   const [addCharFormOpen, setAddCharFormOpen] = useState(false);
   const [removingCharId, setRemovingCharId] = useState<string | null>(null);
   const [itemSearch, setItemSearch] = useState("");
+  const [modSearch, setModSearch] = useState("");
   const [iniSection, setIniSection] = useState<string | null>(null);
   const [iniEditKey, setIniEditKey] = useState("");
   const [iniEditBack, setIniEditBack] = useState("");
@@ -531,6 +533,14 @@ function App() {
         return left.display_name.localeCompare(right.display_name, undefined, { sensitivity: "base" });
       })
     : [];
+  const filteredSortedItemMods = sortedItemMods.filter((mod) => {
+    if (!modSearch.trim()) {
+      return true;
+    }
+
+    const query = modSearch.trim().toLowerCase();
+    return mod.display_name.toLowerCase().includes(query) || mod.name.toLowerCase().includes(query);
+  });
   const currentPreviewPath = modPreviewImages[previewIndex] ?? modPreviewImages[0] ?? null;
   const themeMode = normalizeTheme(draftSettings?.theme ?? persistedSettings?.theme);
   const isGameTheme = themeMode === "game";
@@ -679,6 +689,7 @@ function App() {
       });
       setItemMods(nextMods);
       setActiveItemId(item.id);
+      setModSearch("");
     } finally {
       if (showLoading) {
         setItemLoading(false);
@@ -1103,8 +1114,8 @@ function App() {
     );
     void window.setPosition(
       new LogicalPosition(
-        Number(persistedSettings.window_x) || 100,
-        Number(persistedSettings.window_y) || 100,
+        Number(persistedSettings.window_x) <= -30000 ? 100 : (Number(persistedSettings.window_x) || 100),
+        Number(persistedSettings.window_y) <= -30000 ? 100 : (Number(persistedSettings.window_y) || 100),
       ),
     );
   }, [persistedSettings?.window_width, persistedSettings?.window_height, persistedSettings?.window_x, persistedSettings?.window_y]);
@@ -1135,6 +1146,12 @@ function App() {
             const nextHeight = Math.max(600, Math.round(size.height));
             const nextX = Math.round(position.x);
             const nextY = Math.round(position.y);
+
+            // Windows reports minimized/off-screen positions around -32000.
+            // Ignore those so we do not persist a broken restore position.
+            if (nextX <= -30000 || nextY <= -30000) {
+              return;
+            }
 
             if (
               currentSettings.window_width === nextWidth
@@ -1495,6 +1512,44 @@ function App() {
     }
   }
 
+  async function handleAddPreview(modPath: string) {
+    setPreviewCopyingPath(modPath);
+    setScanError(null);
+
+    try {
+      const picked = await open({
+        multiple: false,
+        directory: false,
+        title: "Select preview image",
+        defaultPath: currentModRoot || undefined,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif"] }],
+      });
+
+      if (!picked) {
+        return;
+      }
+
+      const imagePath = Array.isArray(picked) ? (picked[0] ?? "") : picked;
+      if (!imagePath) {
+        return;
+      }
+
+      const previewPath = await invoke<string>("copy_mod_preview_image", {
+        modPath,
+        imagePath,
+      });
+
+      setSaveMessage(`Copied preview to ${previewPath}.`);
+      if (modDetails?.mod_path === modPath) {
+        await loadModDetails(modPath);
+      }
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewCopyingPath(null);
+    }
+  }
+
   async function handleToggleFavorite(itemId: string) {
     setFavoriteItemId(itemId);
 
@@ -1618,6 +1673,39 @@ function App() {
       await refresh();
     } catch (err) {
       setSaveMessage(`Install setup failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
+  async function handleCreateAllMissingFolders() {
+    setSavingSettings(true);
+    setSaveMessage(null);
+
+    try {
+      const result = await invoke<{
+        total_created: number;
+        configured_games: number;
+        results: Record<string, { path?: string; created?: number; error?: string }>;
+      }>("create_missing_folders_all_paths");
+
+      const errorEntries = Object.entries(result.results ?? {}).filter(([, entry]) => Boolean(entry?.error));
+      if (errorEntries.length > 0) {
+        const details = errorEntries
+          .map(([game, entry]) => `${game}: ${entry.error ?? "unknown error"}`)
+          .join(" | ");
+        setSaveMessage(
+          `Created ${result.total_created} folders across ${result.configured_games} configured game paths. Errors: ${details}`,
+        );
+      } else {
+        setSaveMessage(
+          `Created ${result.total_created} missing folders across ${result.configured_games} configured game paths.`,
+        );
+      }
+
+      await refresh();
+    } catch (err) {
+      setSaveMessage(`Create missing folders failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSavingSettings(false);
     }
@@ -1844,6 +1932,8 @@ function App() {
     try {
       if (info?.updater_url) {
         try {
+          await invoke("mark_app_update_seen", { latestTag: targetVersion });
+
           const updaterPath = await invoke<string>("download_and_launch_updater", {
             url: info.updater_url,
             appUrl: info.exe_url ?? null,
@@ -2831,6 +2921,14 @@ function App() {
                     </button>
                   ) : null}
                 </div>
+                <input
+                  value={modSearch}
+                  onChange={(event) => {
+                    setModSearch(event.currentTarget.value);
+                  }}
+                  placeholder="Search mods..."
+                  className={clsx("mt-3 max-w-[420px]", managerControlInputClassName)}
+                />
               </div>
               <div className="grid min-w-[220px] grid-cols-3 gap-3">
                 <div className="rounded-2xl border border-white/8 bg-white/4 p-3 text-center">
@@ -2909,8 +3007,8 @@ function App() {
                 <div className="rounded-2xl border border-white/8 bg-white/4 p-5 text-sm text-slate-300">
                   Loading item mods...
                 </div>
-              ) : sortedItemMods.length ? (
-                sortedItemMods.map((mod) => (
+              ) : filteredSortedItemMods.length ? (
+                filteredSortedItemMods.map((mod) => (
                   <article
                     key={mod.path}
                     className={clsx(
@@ -2994,7 +3092,7 @@ function App() {
                                   }}
                                   className="rounded-lg border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200 transition hover:bg-white/8"
                                 >
-                                  Edit
+                                  Rename
                                 </button>
                                 <button
                                   type="button"
@@ -3002,11 +3100,23 @@ function App() {
                                     event.stopPropagation();
                                     void handleSyncPersistSwapkeys(mod.path);
                                   }}
-                                  disabled={syncingPersistPath === mod.path}
+                                  disabled={syncingPersistPath === mod.path || previewCopyingPath === mod.path}
                                   className="rounded-lg border border-cyan-300/28 bg-cyan-400/12 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.12em] text-cyan-100 transition hover:bg-cyan-400/24 disabled:cursor-wait disabled:opacity-70"
                                   title="Sync global persist values from d3dx_user.ini for this mod"
                                 >
                                   {syncingPersistPath === mod.path ? "Saving" : "Safe Mod Toggles"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void handleAddPreview(mod.path);
+                                  }}
+                                  disabled={previewCopyingPath === mod.path || syncingPersistPath === mod.path}
+                                  className="rounded-lg border border-emerald-300/28 bg-emerald-400/12 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.12em] text-emerald-100 transition hover:bg-emerald-400/24 disabled:cursor-wait disabled:opacity-70"
+                                  title="Copy an image into this mod folder as the preview"
+                                >
+                                  {previewCopyingPath === mod.path ? "Copying" : "Add Preview"}
                                 </button>
                               </div>
                               {persistSyncFeedback[mod.path] ? (
@@ -3067,7 +3177,7 @@ function App() {
                 ))
               ) : (
                 <div className="rounded-[24px] border border-white/8 bg-white/4 p-6 text-sm leading-6 text-slate-300/82">
-                  No mod folders found for this item yet.
+                  {modSearch.trim() ? "No mods match your search." : "No mod folders found for this item yet."}
                 </div>
               )}
               </div>
@@ -3391,6 +3501,17 @@ function App() {
               >
                 <Download className="h-4 w-4" />
                 {savingSettings ? "Running install setup..." : "Install/Repair Setup"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleCreateAllMissingFolders();
+                }}
+                disabled={savingSettings}
+                className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/30 disabled:cursor-wait disabled:opacity-70"
+              >
+                <FolderTree className="h-4 w-4" />
+                {savingSettings ? "Creating missing folders..." : "Create Missing Folders"}
               </button>
               {saveMessage ? <p className="text-sm text-slate-300">{saveMessage}</p> : null}
             </div>

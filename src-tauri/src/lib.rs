@@ -5,6 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tauri::{image::Image, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size};
 #[cfg(target_os = "windows")]
@@ -163,6 +164,21 @@ const CATEGORY_KEYS: [&str; 6] = [
     "npcs",
     "buffervalues",
 ];
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn is_valid_window_position(x: f64, y: f64) -> bool {
+    x.is_finite() && y.is_finite() && x > -30000.0 && y > -30000.0
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}_{tick}_{counter}"))
+}
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
@@ -1305,6 +1321,20 @@ fn save_legacy_settings(base_dir: Option<String>, settings: Value) -> Result<Str
     let body = serde_json::to_string_pretty(&merged).map_err(|err| err.to_string())?;
     fs::write(&settings_path, body).map_err(|err| err.to_string())?;
 
+    if let Some(paths) = merged.get("mod_paths").and_then(Value::as_object) {
+        for (game, path_value) in paths {
+            if let Some(path) = path_value.as_str() {
+                let trimmed = path.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Best-effort scaffold so new mod roots are immediately usable.
+                let _ = create_mod_folder_scaffold_internal(game, trimmed);
+            }
+        }
+    }
+
     Ok(normalize_path(&settings_path))
 }
 
@@ -1726,8 +1756,58 @@ fn find_mod_preview_images(path: String) -> Vec<String> {
         stack.extend(subdirs);
     }
 
-    images.sort();
+    images.sort_by(|left, right| {
+        let left_name = Path::new(left)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let right_name = Path::new(right)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let left_priority = if left_name.starts_with("preview") || left_name.starts_with("0preview") {
+            0
+        } else {
+            1
+        };
+        let right_priority = if right_name.starts_with("preview") || right_name.starts_with("0preview") {
+            0
+        } else {
+            1
+        };
+
+        left_priority
+            .cmp(&right_priority)
+            .then_with(|| left_name.cmp(&right_name))
+    });
     images
+}
+
+#[tauri::command]
+fn copy_mod_preview_image(mod_path: String, image_path: String) -> Result<String, String> {
+    let mod_dir = PathBuf::from(&mod_path);
+    if !mod_dir.is_dir() {
+        return Err(format!("Mod folder not found: {mod_path}"));
+    }
+
+    let source = PathBuf::from(&image_path);
+    if !source.is_file() {
+        return Err(format!("Image file not found: {image_path}"));
+    }
+
+    let ext = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| ["png", "jpg", "jpeg", "webp", "bmp", "gif"].contains(&value.as_str()))
+        .ok_or_else(|| "Selected file is not a supported image format.".to_string())?;
+
+    let preview_path = mod_dir.join(format!("preview.{ext}"));
+    fs::copy(&source, &preview_path).map_err(|err| err.to_string())?;
+    Ok(normalize_path(&preview_path))
 }
 
 #[tauri::command]
@@ -2221,6 +2301,32 @@ fn sanitize_file_name(value: &str) -> String {
     }
 }
 
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn download_with_powershell(url: &str, destination: &Path) -> Result<(), String> {
+    let url_quoted = escape_powershell_single_quoted(url);
+    let out_quoted = escape_powershell_single_quoted(destination.to_string_lossy().as_ref());
+    let script = format!(
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{url_quoted}' -OutFile '{out_quoted}' -UseBasicParsing"
+    );
+
+    let output = background_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|err| format!("powershell not available: {err}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "PowerShell download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 fn download_to_path(url: &str, destination: &Path) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("Invalid download URL".to_string());
@@ -2238,17 +2344,26 @@ fn download_to_path(url: &str, destination: &Path) -> Result<(), String> {
             destination.to_str().unwrap_or_default(),
             url,
         ])
-        .output()
-        .map_err(|err| format!("curl not available: {err}"))?;
+        .output();
 
-    if !output.status.success() {
-        return Err(format!(
-            "Download failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    match output {
+        Ok(curl_output) if curl_output.status.success() => return Ok(()),
+        Ok(curl_output) => {
+            if download_with_powershell(url, destination).is_ok() {
+                return Ok(());
+            }
+            return Err(format!(
+                "Download failed via curl and PowerShell. curl: {}",
+                String::from_utf8_lossy(&curl_output.stderr)
+            ));
+        }
+        Err(curl_err) => {
+            download_with_powershell(url, destination).map_err(|ps_err| {
+                format!("curl not available: {curl_err}; fallback also failed: {ps_err}")
+            })?;
+            return Ok(());
+        }
     }
-
-    Ok(())
 }
 
 fn default_downloads_folder() -> Option<PathBuf> {
@@ -2366,6 +2481,67 @@ fn ensure_buffer_values_folders(mod_paths: Value) -> Result<Vec<String>, String>
 
 #[tauri::command]
 fn create_mod_folder_scaffold(game: String, mod_root: String) -> Result<usize, String> {
+    create_mod_folder_scaffold_internal(&game, &mod_root)
+}
+
+#[tauri::command]
+fn create_missing_folders_all_paths() -> Result<Value, String> {
+    let settings = load_settings_snapshot()?;
+    let mut per_game = Map::new();
+    let mut total_created = 0usize;
+
+    let Some(paths) = settings.get("mod_paths").and_then(Value::as_object) else {
+        return Ok(json!({
+            "total_created": 0,
+            "configured_games": 0,
+            "results": {}
+        }));
+    };
+
+    let mut configured_games = 0usize;
+    for (game, value) in paths {
+        let Some(mod_root_raw) = value.as_str() else {
+            continue;
+        };
+
+        let mod_root = mod_root_raw.trim();
+        if mod_root.is_empty() {
+            continue;
+        }
+
+        configured_games += 1;
+
+        match create_mod_folder_scaffold_internal(game, mod_root) {
+            Ok(created) => {
+                total_created += created;
+                per_game.insert(
+                    game.clone(),
+                    json!({
+                        "path": normalize_path(&PathBuf::from(mod_root)),
+                        "created": created
+                    }),
+                );
+            }
+            Err(err) => {
+                per_game.insert(
+                    game.clone(),
+                    json!({
+                        "path": mod_root,
+                        "error": err
+                    }),
+                );
+            }
+        }
+    }
+
+    Ok(json!({
+        "total_created": total_created,
+        "configured_games": configured_games,
+        "results": per_game
+    }))
+}
+
+fn create_mod_folder_scaffold_internal(game: &str, mod_root: &str) -> Result<usize, String> {
     let mod_root = mod_root.trim();
     if mod_root.is_empty() {
         return Err("Mod root path is empty".to_string());
@@ -2425,13 +2601,7 @@ fn download_and_install_mod_blocking(
         return Err("Invalid download URL".to_string());
     }
 
-    let download_root = std::env::temp_dir().join(format!(
-        "modmgr_dl_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
+    let download_root = unique_temp_dir("modmgr_dl");
     fs::create_dir_all(&download_root).map_err(|err| err.to_string())?;
 
     let url_path = url.split('?').next().unwrap_or(&url);
@@ -2489,13 +2659,7 @@ fn install_archive_mod_blocking(
 
     let safe_name = sanitize_folder_name(&mod_name);
 
-    let temp_root = std::env::temp_dir().join(format!(
-        "modmgr_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
+    let temp_root = unique_temp_dir("modmgr_extract");
     fs::create_dir_all(&temp_root).map_err(|err| err.to_string())?;
 
     let raw_ext = source_archive
@@ -2548,7 +2712,9 @@ fn install_archive_mod_blocking(
             PathBuf::from("7zr"),
             PathBuf::from("7zr.exe"),
             PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files\7-Zip\7zz.exe"),
             PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7zz.exe"),
             PathBuf::from(r"C:\Program Files\WinRAR\UnRAR.exe"),
             PathBuf::from(r"C:\Program Files (x86)\WinRAR\UnRAR.exe"),
         ];
@@ -2560,10 +2726,34 @@ fn install_archive_mod_blocking(
 
         candidates.extend(winrar_candidates.iter().cloned());
 
+        // Discover extractors from PATH/custom installs.
+        for name in ["7z", "7z.exe", "7zz", "7zz.exe", "7zr", "7zr.exe", "UnRAR.exe", "WinRAR.exe"] {
+            if let Ok(output) = background_command("where")
+                .args([name])
+                .output()
+            {
+                if output.status.success() {
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            candidates.push(PathBuf::from(trimmed));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut unique_candidates: Vec<PathBuf> = Vec::new();
+        for candidate in candidates {
+            if !unique_candidates.iter().any(|seen| seen == &candidate) {
+                unique_candidates.push(candidate);
+            }
+        }
+
         let mut saw_spawn_error = false;
         let mut last_output: Option<std::process::Output> = None;
 
-        for candidate in candidates {
+        for candidate in unique_candidates {
             let is_winrar = candidate
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -2583,7 +2773,12 @@ fn install_archive_mod_blocking(
                     last_output = Some(output);
                 }
                 Err(err) => {
-                    if err.contains("program not found") || err.contains("cannot find the file") {
+                    let err_lower = err.to_lowercase();
+                    if err_lower.contains("program not found")
+                        || err_lower.contains("cannot find the file")
+                        || err_lower.contains("the system cannot find")
+                        || err_lower.contains("os error 2")
+                    {
                         saw_spawn_error = true;
                         continue;
                     }
@@ -2698,7 +2893,22 @@ fn install_archive_mod_blocking(
                 _ => None,
             }
         } else {
-            None
+            let source_preview = PathBuf::from(trimmed);
+            if source_preview.is_file() {
+                let ext = source_preview
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .filter(|e| ["png", "jpg", "jpeg", "webp", "bmp", "gif"].contains(&e.as_str()))
+                    .unwrap_or_else(|| "jpg".to_string());
+                let preview_file = dest.join(format!("preview.{ext}"));
+                match fs::copy(&source_preview, &preview_file) {
+                    Ok(_) => Some(normalize_path(&preview_file)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
         }
     } else {
         None
@@ -2735,10 +2945,16 @@ async fn install_local_archive_mod(
     archive_path: String,
     dest_item_path: String,
     mod_name: String,
+    preview_url: Option<String>,
 ) -> Result<DownloadInstallResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let source_archive = archive_path.clone();
-        let installed = install_archive_mod_blocking(archive_path, dest_item_path, mod_name, None)?;
+        let installed = install_archive_mod_blocking(
+            archive_path,
+            dest_item_path,
+            mod_name,
+            preview_url,
+        )?;
         let _ = fs::remove_file(source_archive);
         Ok(installed)
     })
@@ -2785,19 +3001,46 @@ fn import_mod_folder(dest_item_path: String, source_path: String) -> Result<Stri
 fn add_custom_character(game: String, id: String, name: String) -> Result<(), String> {
     let resources_dir = resolve_resources_dir()?;
     let file_path = resources_dir.join(format!("addedCharacters_{game}.json"));
+    let normalized_id = id.trim().to_string();
+    let normalized_name = name.trim().to_string();
+
+    if normalized_id.is_empty() {
+        return Err("Character id cannot be empty.".to_string());
+    }
+
+    if normalized_name.is_empty() {
+        return Err("Character name cannot be empty.".to_string());
+    }
 
     let mut entries = read_json_array(&file_path);
     let already_exists = entries
         .iter()
-        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()));
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(normalized_id.as_str()));
     if already_exists {
-        return Err(format!("Character '{id}' already exists."));
+        return Err(format!("Character '{normalized_id}' already exists."));
     }
 
-    entries.push(json!({ "id": id.trim(), "name": name.trim() }));
+    entries.push(json!({ "id": normalized_id, "name": normalized_name }));
     let body = serde_json::to_string_pretty(&entries).map_err(|err| err.to_string())?;
     fs::create_dir_all(&resources_dir).map_err(|err| err.to_string())?;
     fs::write(&file_path, body).map_err(|err| err.to_string())?;
+
+    if let Ok(settings) = load_settings_snapshot() {
+        if let Some(mod_root) = settings
+            .get("mod_paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get(&game))
+            .and_then(Value::as_str)
+        {
+            let target = build_item_folder_path(
+                &PathBuf::from(mod_root),
+                "characters",
+                Some(id.trim()),
+            );
+            let _ = fs::create_dir_all(target);
+        }
+    }
+
     Ok(())
 }
 
@@ -3093,6 +3336,10 @@ fn mark_app_update_seen(latest_tag: String) -> Result<(), String> {
                 "last_app_release_tag".to_string(),
                 serde_json::Value::String(normalized),
             );
+            map.remove("update_check_ts");
+            map.remove("update_check_result");
+            map.remove("last_update_check_ts");
+            map.remove("last_update_check_result");
         }
     });
     Ok(())
@@ -3266,6 +3513,11 @@ fn bootstrap_installation(
             .unwrap_or_else(|_| "0".to_string());
         map.insert("resources_last_downloaded_at".to_string(), Value::String(downloaded_at));
 
+        map.remove("update_check_ts");
+        map.remove("update_check_result");
+        map.remove("last_update_check_ts");
+        map.remove("last_update_check_result");
+
         // Merge in user-chosen mod paths from the wizard.
         if let Some(ref paths) = merged_game_mod_paths {
             let mod_paths_value = map
@@ -3431,7 +3683,10 @@ pub fn run() {
                         .unwrap_or(100.0);
 
                     let _ = window.set_size(Size::Logical(LogicalSize::new(width, height)));
-                    let _ = window.set_position(Position::Logical(LogicalPosition::new(pos_x, pos_y)));
+                    if is_valid_window_position(pos_x, pos_y) {
+                        let _ = window
+                            .set_position(Position::Logical(LogicalPosition::new(pos_x, pos_y)));
+                    }
                 }
             }
             Ok(())
@@ -3454,6 +3709,7 @@ pub fn run() {
             import_mod_folder,
             add_custom_character,
             remove_custom_character,
+            copy_mod_preview_image,
             find_mod_preview_images,
             load_image_data_url,
             load_images_data_urls,
@@ -3462,6 +3718,7 @@ pub fn run() {
             download_file_to_folder,
             ensure_buffer_values_folders,
             create_mod_folder_scaffold,
+            create_missing_folders_all_paths,
             download_and_install_mod,
             install_local_archive_mod,
             save_ini_value,

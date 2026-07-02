@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { Webview } from "@tauri-apps/api/webview";
@@ -10,6 +11,7 @@ import type { DownloadEventPayload } from "./BrowseTab";
 import type { GameKey } from "./types";
 
 const NEXTCLOUD_WEBVIEW_LABEL = "nextcloud-browser-view";
+const NEXTCLOUD_DOWNLOAD_EVENT = "mod-manager-web-download-request";
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -28,6 +30,30 @@ type DownloadInstallResult = {
   destination_path: string;
   preview_path: string | null;
 };
+
+type WebDownloadRequestPayload = {
+  source: "nextcloud";
+  url: string;
+  fileName?: string;
+};
+
+function deriveNameFromUrl(url: string, fallback = "download"): string {
+  try {
+    const parsed = new URL(url);
+    const file = decodeURIComponent(parsed.pathname.split("/").pop() || "").trim();
+    return file || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function deriveModName(fileName: string): string {
+  return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
+}
+
+function isLikelyDownloadUrl(url: string): boolean {
+  return /\bdownload\b|attachment|\/files\//i.test(url) || /\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+}
 
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();
@@ -49,6 +75,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [localInstallStatus, setLocalInstallStatus] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
   const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
 
@@ -102,6 +129,84 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
     return Array.isArray(picked) ? picked[0] ?? null : picked;
   }, [gameModRoot]);
 
+  const pickOptionalPreviewImage = useCallback(async (): Promise<string | null> => {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "Optional: Select preview image (Cancel to skip)",
+      defaultPath: downloadsFolder,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif"] }],
+    });
+
+    if (!picked) {
+      return null;
+    }
+
+    return Array.isArray(picked) ? picked[0] ?? null : picked;
+  }, [downloadsFolder]);
+
+  const handleManagedDownload = useCallback(async (url: string, preferredName?: string) => {
+    if (!url || !isLikelyDownloadUrl(url)) {
+      return;
+    }
+
+    const fileName = (preferredName?.trim() || deriveNameFromUrl(url, "download")).trim();
+    const modName = deriveModName(fileName);
+    const destination = await pickInstallDestination();
+    if (!destination) {
+      return;
+    }
+    const previewImage = await pickOptionalPreviewImage();
+
+    const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    onDownloadEvent?.({
+      kind: "start",
+      source: "nextcloud",
+      id: requestId,
+      modName,
+      fileName,
+      destinationPath: destination,
+    });
+
+    setDownloading(true);
+    setDownloadError(null);
+    setLocalInstallStatus(null);
+
+    try {
+      const result = await invoke<DownloadInstallResult>("download_and_install_mod", {
+        url,
+        destItemPath: destination,
+        modName,
+        previewUrl: previewImage,
+      });
+
+      onDownloadEvent?.({
+        kind: "success",
+        source: "nextcloud",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: result.destination_path,
+        installedPath: result.installed_path,
+        previewPath: result.preview_path,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDownloadError(message);
+      onDownloadEvent?.({
+        kind: "error",
+        source: "nextcloud",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: destination,
+        message,
+      });
+    } finally {
+      setDownloading(false);
+    }
+  }, [onDownloadEvent, pickInstallDestination, pickOptionalPreviewImage]);
+
   const handleInstallDownloadedArchive = useCallback(async () => {
     const picked = await open({
       multiple: false,
@@ -124,6 +229,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
     if (!destination) {
       return;
     }
+    const previewImage = await pickOptionalPreviewImage();
 
     const fileName = archivePath.split(/[\\/]/).pop()?.trim() || "download.zip";
     const modName = fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
@@ -147,6 +253,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
         archivePath,
         destItemPath: destination,
         modName,
+        previewUrl: previewImage,
       });
 
       onDownloadEvent?.({
@@ -176,7 +283,7 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
     } finally {
       setInstallingLocalArchive(false);
     }
-  }, [downloadsFolder, onDownloadEvent, pickInstallDestination]);
+  }, [downloadsFolder, onDownloadEvent, pickInstallDestination, pickOptionalPreviewImage]);
 
   const runWebviewScript = useCallback(
     async (script: string) => {
@@ -354,6 +461,160 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
     });
   }, [refreshNonce, browserUrl, canUseNativeWebview, runWebviewScript]);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<WebDownloadRequestPayload>(NEXTCLOUD_DOWNLOAD_EVENT, (event) => {
+      if (disposed) {
+        return;
+      }
+      const payload = event.payload;
+      if (!payload || payload.source !== "nextcloud") {
+        return;
+      }
+      if (!payload.url) {
+        return;
+      }
+      void handleManagedDownload(payload.url, payload.fileName);
+    }).then((fn) => {
+      if (disposed) {
+        void fn();
+        return;
+      }
+      unlisten = fn;
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, [handleManagedDownload]);
+
+  useEffect(() => {
+    if (!canUseNativeWebview || !webviewRef.current || !browserUrl) {
+      return;
+    }
+
+    const installHookScript = `(() => {
+      try {
+        if ((window).__modManagerNextcloudDownloadHookInstalled) {
+          return;
+        }
+        (window).__modManagerNextcloudDownloadHookInstalled = true;
+
+        const isDownloadUrl = (url) => /\\bdownload\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+
+        const toAbsoluteUrl = (value) => {
+          try {
+            return new URL(String(value || ''), window.location.href).href;
+          } catch {
+            return String(value || '');
+          }
+        };
+
+        const emitDownload = (href, fileName) => {
+          if (!href) {
+            return false;
+          }
+          const absolute = toAbsoluteUrl(href);
+          if (!absolute || !isDownloadUrl(absolute)) {
+            return false;
+          }
+          if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+            void window.__TAURI_INTERNALS__.invoke('emit_web_download_request', {
+              source: 'nextcloud',
+              url: absolute,
+              fileName: (fileName || '').trim(),
+            }).catch(() => {});
+            return true;
+          }
+          return false;
+        };
+
+        const stopEvent = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+          }
+        };
+
+        document.addEventListener('click', (event) => {
+          const target = event.target;
+          const anchor = target && target.closest ? target.closest('a[href], area[href]') : null;
+          if (!anchor) {
+            return;
+          }
+
+          const href = anchor.href || '';
+          const explicitDownload = anchor.hasAttribute('download');
+          if (!href || (!explicitDownload && !isDownloadUrl(href))) {
+            return;
+          }
+
+          stopEvent(event);
+          const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
+          emitDownload(href, fileName || document.title || 'download');
+        }, true);
+
+        document.addEventListener('submit', (event) => {
+          const form = event.target;
+          if (!form || !form.action) {
+            return;
+          }
+          if (emitDownload(form.action, document.title || 'download')) {
+            stopEvent(event);
+          }
+        }, true);
+
+        const originalOpen = window.open ? window.open.bind(window) : null;
+        if (originalOpen) {
+          window.open = function(url, target, features) {
+            if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
+              return null;
+            }
+            return originalOpen(url, target, features);
+          };
+        }
+
+        (window).__modManagerNextcloudPollDownloadUrl = () => {
+          const href = window.location.href || '';
+          if (isDownloadUrl(href) && href !== (window).__modManagerLastDlUrl) {
+            (window).__modManagerLastDlUrl = href;
+            emitDownload(href, document.title || 'download');
+          }
+        };
+      } catch {
+        // Ignore script injection failures on restricted pages.
+      }
+    })();`;
+
+    const pollScript = `(() => {
+      try {
+        if (typeof (window).__modManagerNextcloudPollDownloadUrl === 'function') {
+          (window).__modManagerNextcloudPollDownloadUrl();
+        }
+      } catch {
+        // Ignore transient polling errors.
+      }
+    })();`;
+
+    const intervalId = window.setInterval(() => {
+      void runWebviewScript(installHookScript).catch(() => {});
+      void runWebviewScript(pollScript).catch(() => {});
+    }, 1200);
+
+    void runWebviewScript(installHookScript).catch(() => {});
+    void runWebviewScript(pollScript).catch(() => {});
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [browserUrl, canUseNativeWebview, runWebviewScript]);
+
   async function handleOpenExternal(url: string) {
     if (!url) {
       return;
@@ -529,6 +790,9 @@ export function NextcloudTab({ game, gameModRoot, links, onDownloadEvent, onGame
           <p className="mt-2 text-xs text-amber-200/90">
             Native webview error: {nativeError}
           </p>
+        ) : null}
+        {downloading ? (
+          <p className="mt-2 text-xs text-cyan-100/90">Installing selected download...</p>
         ) : null}
         {downloadError ? (
           <p className="mt-2 text-xs text-rose-200/90">Download install failed: {downloadError}</p>
