@@ -11,6 +11,8 @@
 /// The manager itself handles replacing update.exe after it relaunches.
 
 use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -65,9 +67,9 @@ fn main() {
 
     // Step 1: Wait for the manager to fully exit
     if let Some(pid) = manager_pid {
-        eprintln!("[updater] Waiting for manager PID {} to exit...", pid);
+        log_line(&install_dir, &format!("Waiting for manager PID {pid} to exit..."));
         wait_for_process_exit(pid);
-        eprintln!("[updater] Manager exited.");
+        log_line(&install_dir, "Manager exited.");
     } else {
         // No PID supplied — give the manager a moment to close
         thread::sleep(Duration::from_secs(2));
@@ -75,41 +77,43 @@ fn main() {
 
     // Step 2: Download and replace mod-manager-v2.exe
     if let Some(ref url) = app_url {
-        eprintln!("[updater] Downloading new app from {}", url);
+        log_line(&install_dir, &format!("Downloading new app from {url}"));
         let target = install_dir.join("mod-manager-v2.exe");
         let temp = install_dir.join("mod-manager-v2.exe.new");
         if download_file(url, &temp) {
-            let _ = std::fs::remove_file(&target);
-            match std::fs::rename(&temp, &target) {
+            match replace_with_retries(&temp, &target) {
                 Ok(_) => {
-                    eprintln!("[updater] Replaced mod-manager-v2.exe");
+                    log_line(&install_dir, "Replaced mod-manager-v2.exe");
                     if let Some(tag) = app_tag.as_ref() {
                         let _ = write_installed_app_tag(&install_dir, tag);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[updater] Failed to replace app exe: {}", e);
+                    log_line(&install_dir, &format!("Failed to replace app exe: {e}"));
                     let _ = std::fs::remove_file(&temp);
                 }
             }
         } else {
-            eprintln!("[updater] App download failed — keeping existing exe.");
+            log_line(&install_dir, "App download failed — keeping existing exe.");
         }
     } else {
-        eprintln!("[updater] No --app-url provided; skipping app download.");
+        log_line(&install_dir, "No --app-url provided; skipping app download.");
     }
 
     // Step 3: Re-launch manager (manager will handle updating update.exe itself)
     let manager_exe = install_dir.join("mod-manager-v2.exe");
     if manager_exe.exists() {
-        eprintln!("[updater] Relaunching {}", manager_exe.display());
+        log_line(&install_dir, &format!("Relaunching {}", manager_exe.display()));
         let _ = Command::new(&manager_exe)
             .current_dir(&install_dir)
             .spawn();
     } else {
-        eprintln!(
-            "[updater] mod-manager-v2.exe not found at {}; cannot relaunch.",
-            install_dir.display()
+        log_line(
+            &install_dir,
+            &format!(
+                "mod-manager-v2.exe not found at {}; cannot relaunch.",
+                install_dir.display()
+            ),
         );
     }
 }
@@ -160,6 +164,30 @@ fn download_file(url: &str, dest: &PathBuf) -> bool {
         ])
         .status();
     matches!(status, Ok(s) if s.success())
+}
+
+fn log_line(install_dir: &PathBuf, message: &str) {
+    eprintln!("[updater] {message}");
+    let log_path = install_dir.join("updater.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "[updater] {message}");
+    }
+}
+
+fn replace_with_retries(temp: &PathBuf, target: &PathBuf) -> Result<(), String> {
+    for _ in 0..120 {
+        let _ = fs::remove_file(target);
+        if fs::rename(temp, target).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    // Last chance: copy-over if rename keeps failing.
+    fs::copy(temp, target)
+        .map_err(|e| format!("rename/copy failed for {}: {e}", target.display()))?;
+    let _ = fs::remove_file(temp);
+    Ok(())
 }
 
 fn normalize_release_tag(value: &str) -> String {

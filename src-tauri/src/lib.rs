@@ -18,6 +18,10 @@ const DEFAULT_VERSION: &str = "1.2.3";
 const APP_RELEASES_API: &str = "https://api.github.com/repos/Sanddino00/Mod-Manager/releases/latest";
 const RESOURCES_RELEASES_API: &str =
     "https://api.github.com/repos/Sanddino00/Resources-for-Fixmanager-and-Modmanager/releases/latest";
+const CUSTOM_FIXES_DIR_NAME: &str = "custom fixes";
+const STOCK_GAME_KEYS: [&str; 5] = ["gi", "hsr", "wuwa", "zzz", "end"];
+const ICON_DIR_CANDIDATES: [&str; 3] = ["Icon", "Icons", "icons"];
+const DEV_BACKGROUND_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
 #[derive(Debug, Serialize)]
 struct LegacyInstall {
@@ -1102,6 +1106,17 @@ fn default_settings(base_dir: &Path) -> Value {
         "remember_web_sessions": true,
         "enable_login_helper_hints": true,
         "enable_web_adblocker": true,
+        "remove_downloaded_stock_fixes_after_update": false,
+        "show_nextcloud_tabs": true,
+        "show_discord_tab": true,
+        "show_modding_sides_tab": true,
+        "gamebanana_saved_username": "",
+        "gamebanana_saved_password": "",
+        "arca_saved_username": "",
+        "arca_saved_password": "",
+        "dev_mode": false,
+        "dev_use_image_background": false,
+        "dev_use_all_backgrounds": false,
         "last_release_tag": Value::Null,
         "last_app_release_tag": Value::Null,
         "last_resources_release_tag": Value::Null,
@@ -1253,6 +1268,17 @@ fn load_settings_from_install(install: &LegacyInstall) -> (Value, bool) {
 
 #[tauri::command]
 fn load_bootstrap_state() -> Result<BootstrapState, String> {
+    if let Ok(resources_dir) = resolve_resources_dir() {
+        let _ = ensure_custom_fixes_scaffold(&resources_dir);
+        if let Some(base) = resources_dir.parent() {
+            let _ = ensure_runtime_tools_scaffold(base);
+        }
+    }
+    if let Some(base) = resolve_best_dev_app_base().or_else(resolve_install_base) {
+        let _ = ensure_dev_app_scaffold(&base);
+        let _ = ensure_runtime_tools_scaffold(&base);
+    }
+
     let detected_paths = legacy_candidate_paths()
         .into_iter()
         .map(|path| normalize_path(&path))
@@ -1601,33 +1627,45 @@ fn toggle_item_favorite(game: String, item_id: String) -> Result<bool, String> {
 #[tauri::command]
 fn load_fixes_panel(game: String) -> Result<FixesPanelData, String> {
     let resources_dir = resolve_resources_dir()?;
-    let scripts_dir = resources_dir.join(&game);
-    let mut scripts = fs::read_dir(&scripts_dir)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.filter_map(Result::ok))
-        .filter_map(|entry| {
+    ensure_custom_fixes_scaffold(&resources_dir)?;
+
+    let mut dedupe: HashMap<String, FixScriptSummary> = HashMap::new();
+    let script_dirs = [
+        resources_dir.join(&game),
+        resources_dir.join(CUSTOM_FIXES_DIR_NAME).join(&game),
+    ];
+
+    for scripts_dir in script_dirs {
+        let entries = match fs::read_dir(&scripts_dir) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
             if !path.is_file() {
-                return None;
+                continue;
             }
 
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".py") {
-                Some(FixScriptSummary {
-                    name,
-                    kind: "python".to_string(),
-                })
+            let kind = if name.ends_with(".py") {
+                Some("python")
             } else if name.ends_with(".exe") {
-                Some(FixScriptSummary {
-                    name,
-                    kind: "exe".to_string(),
-                })
+                Some("exe")
             } else {
                 None
+            };
+
+            if let Some(kind) = kind {
+                dedupe.entry(name.clone()).or_insert_with(|| FixScriptSummary {
+                    name,
+                    kind: kind.to_string(),
+                });
             }
-        })
-        .collect::<Vec<_>>();
+        }
+    }
+
+    let mut scripts = dedupe.into_values().collect::<Vec<_>>();
     scripts.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
 
     Ok(FixesPanelData {
@@ -1640,7 +1678,18 @@ fn load_fixes_panel(game: String) -> Result<FixesPanelData, String> {
 #[tauri::command]
 fn run_fix_script(game: String, script_name: String, target_path: String) -> Result<(), String> {
     let resources_dir = resolve_resources_dir()?;
-    let script_path = resources_dir.join(&game).join(&script_name);
+    ensure_custom_fixes_scaffold(&resources_dir)?;
+
+    let custom_script_path = resources_dir
+        .join(CUSTOM_FIXES_DIR_NAME)
+        .join(&game)
+        .join(&script_name);
+    let stock_script_path = resources_dir.join(&game).join(&script_name);
+    let script_path = if custom_script_path.is_file() {
+        custom_script_path
+    } else {
+        stock_script_path
+    };
 
     if !script_path.is_file() {
         return Err("Script not found".to_string());
@@ -1869,6 +1918,501 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
             fs::copy(entry.path(), &dest_child).map_err(|err| err.to_string())?;
         }
     }
+    Ok(())
+}
+
+fn replace_dir_contents(src: &Path, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|err| err.to_string())?;
+    }
+    copy_dir_recursive(src, dest)
+}
+
+fn ensure_custom_fixes_scaffold(resources_dir: &Path) -> Result<(), String> {
+    let custom_root = resources_dir.join(CUSTOM_FIXES_DIR_NAME);
+    fs::create_dir_all(&custom_root).map_err(|err| err.to_string())?;
+
+    for game in STOCK_GAME_KEYS {
+        let per_game = custom_root.join(game);
+        fs::create_dir_all(&per_game).map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn ensure_dev_app_scaffold(install_base: &Path) -> Result<(), String> {
+    let app_root = install_base.join("app");
+    fs::create_dir_all(&app_root).map_err(|err| err.to_string())?;
+    fs::create_dir_all(app_root.join("icon")).map_err(|err| err.to_string())?;
+    fs::create_dir_all(app_root.join("all")).map_err(|err| err.to_string())?;
+
+    for game in STOCK_GAME_KEYS {
+        fs::create_dir_all(app_root.join(game)).map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn ensure_runtime_tools_scaffold(install_base: &Path) -> Result<(), String> {
+    let tools_dir = install_base.join("tools");
+    fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
+
+    // Move/sync extractor binaries from bundled app paths so clean systems do
+    // not require a separate 7-Zip installation.
+    let mut source_dirs: Vec<(PathBuf, bool)> = vec![(install_base.join("resources").join("tools"), true)];
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            source_dirs.push((exe_dir.join("resources").join("tools"), true));
+            source_dirs.push((exe_dir.join("tools"), false));
+        }
+    }
+
+    let tool_names = ["7za.exe", "7z.exe", "7zz.exe", "7zr.exe", "7z.dll"];
+    for (source_dir, move_out_of_source) in source_dirs {
+        if !source_dir.is_dir() {
+            continue;
+        }
+
+        if source_dir == tools_dir {
+            continue;
+        }
+
+        for tool_name in tool_names {
+            let src = source_dir.join(tool_name);
+            let dst = tools_dir.join(tool_name);
+            if !src.is_file() {
+                continue;
+            }
+
+            if move_out_of_source {
+                if fs::rename(&src, &dst).is_err() {
+                    if fs::copy(&src, &dst).is_ok() {
+                        let _ = fs::remove_file(&src);
+                    }
+                }
+            } else if !dst.is_file() {
+                let _ = fs::copy(&src, &dst);
+            }
+        }
+
+        if move_out_of_source {
+            let _ = fs::remove_dir(&source_dir);
+        }
+    }
+
+    Ok(())
+}
+
+fn push_unique_dev_base(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
+    let key = normalize_path(&path).to_ascii_lowercase();
+    if seen.insert(key) {
+        candidates.push(path);
+    }
+}
+
+fn dev_app_base_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            push_unique_dev_base(&mut candidates, &mut seen, exe_dir.to_path_buf());
+        }
+    }
+
+    if let Ok(resources_dir) = resolve_resources_dir() {
+        if let Some(install_base) = resources_dir.parent() {
+            push_unique_dev_base(&mut candidates, &mut seen, install_base.to_path_buf());
+        }
+    }
+
+    if let Some(base) = resolve_install_base() {
+        push_unique_dev_base(&mut candidates, &mut seen, base);
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        push_unique_dev_base(&mut candidates, &mut seen, cwd);
+    }
+
+    candidates
+}
+
+fn dir_has_any_file(dir: &Path) -> bool {
+    fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .any(|entry| entry.path().is_file())
+}
+
+fn dev_app_base_score(base: &Path) -> usize {
+    let app_root = base.join("app");
+    if !app_root.is_dir() {
+        return 0;
+    }
+
+    let mut score = 100usize;
+    if dir_has_any_file(&app_root.join("icon")) {
+        score += 30;
+    }
+    if first_supported_image_in_dir(&app_root.join("all")).is_some() {
+        score += 20;
+    }
+    if STOCK_GAME_KEYS
+        .iter()
+        .any(|game| first_supported_image_in_dir(&app_root.join(game)).is_some())
+    {
+        score += 10;
+    }
+
+    score
+}
+
+fn resolve_best_dev_app_base() -> Option<PathBuf> {
+    let candidates = dev_app_base_candidates();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(usize, PathBuf)> = None;
+    for candidate in candidates {
+        let score = dev_app_base_score(&candidate);
+        match &best {
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => {
+                best = Some((score, candidate));
+            }
+        }
+    }
+
+    if let Some((score, base)) = best {
+        if score > 0 {
+            return Some(base);
+        }
+    }
+
+    dev_app_base_candidates().into_iter().next()
+}
+
+fn apply_dev_icon_to_main_window(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let Some(dev_base) = resolve_best_dev_app_base() else {
+        return Ok(None);
+    };
+
+    ensure_dev_app_scaffold(&dev_base)?;
+
+    let Some(custom_icon_path) = resolve_dev_icon_candidate(&dev_base) else {
+        return Ok(None);
+    };
+
+    let icon_bytes = fs::read(&custom_icon_path).map_err(|err| err.to_string())?;
+    let icon = Image::from_bytes(&icon_bytes).map_err(|err| err.to_string())?;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    window.set_icon(icon).map_err(|err| err.to_string())?;
+
+    let shortcut_refresh = apply_dev_shortcut_icons(&custom_icon_path)
+        .map(|count| format!("; shortcuts refreshed: {count}"))
+        .unwrap_or_else(|err| format!("; shortcut refresh failed: {err}"));
+
+    Ok(Some(format!(
+        "{}{}",
+        normalize_path(&custom_icon_path),
+        shortcut_refresh
+    )))
+}
+
+#[cfg(target_os = "windows")]
+fn apply_dev_shortcut_icons(icon_path: &Path) -> Result<usize, String> {
+    let icon_native = local_path(icon_path).replace('"', "\"\"").replace('\'', "''");
+        let script = format!(
+                r#"
+$icon='{icon_native}'
+$roots=@(
+    (Join-Path $env:USERPROFILE 'Desktop'),
+    (Join-Path $env:PUBLIC 'Desktop'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+    (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
+    (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
+)
+$wsh=New-Object -ComObject WScript.Shell
+$count=0
+foreach($root in $roots) {{
+    if(-not (Test-Path $root)) {{ continue }}
+    Get-ChildItem -Path $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {{
+        try {{
+            $sc=$wsh.CreateShortcut($_.FullName)
+            $target="$($sc.TargetPath)"
+            if([string]::IsNullOrWhiteSpace($target)) {{ return }}
+            $leaf=[System.IO.Path]::GetFileName($target.Trim('"'))
+            if($leaf -ieq 'mod-manager-v2.exe') {{
+                $sc.IconLocation="$icon,0"
+                $sc.Save()
+                $count++
+            }}
+        }} catch {{}}
+    }}
+}}
+Write-Output $count
+"#
+        );
+
+    let output = background_command("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to refresh shortcut icons: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let _ = background_command("ie4uinit.exe").args(["-show"]).status();
+    let _ = background_command("ie4uinit.exe").args(["-ClearIconCache"]).status();
+
+    Ok(count)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_dev_shortcut_icons(_icon_path: &Path) -> Result<usize, String> {
+    Ok(0)
+}
+
+fn clear_dir_contents(dir: &Path) -> Result<usize, String> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| err.to_string())?;
+        } else {
+            fs::remove_file(&path).map_err(|err| err.to_string())?;
+        }
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
+fn purge_downloaded_stock_fixes(resources_dir: &Path) -> Result<usize, String> {
+    let mut removed_total = 0usize;
+
+    for game in STOCK_GAME_KEYS {
+        let game_dir = resources_dir.join(game);
+        removed_total += clear_dir_contents(&game_dir)?;
+    }
+
+    Ok(removed_total)
+}
+
+fn first_supported_image_in_dir(folder: &Path) -> Option<PathBuf> {
+    let mut matches = fs::read_dir(folder)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| {
+                        DEV_BACKGROUND_EXTENSIONS
+                            .iter()
+                            .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+                    })
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort_by(|left, right| {
+        left.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .cmp(
+                &right
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+            )
+    });
+
+    matches.into_iter().next()
+}
+
+fn resolve_dev_icon_candidate(install_base: &Path) -> Option<PathBuf> {
+    let app_root = install_base.join("app");
+    let icon_dir = app_root.join("icon");
+
+    let mut candidates = Vec::new();
+
+    for folder in [&icon_dir, &app_root] {
+        if let Ok(entries) = fs::read_dir(folder) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+
+                let ext = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+
+                if ["ico", "png", "jpg", "jpeg", "webp", "bmp", "gif"]
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&ext))
+                {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        let left_ext = left
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let right_ext = right
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let left_priority = if left_ext == "ico" { 0 } else { 1 };
+        let right_priority = if right_ext == "ico" { 0 } else { 1 };
+
+        left_priority.cmp(&right_priority).then_with(|| {
+            left.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .cmp(
+                    &right
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
+                )
+        })
+    });
+
+    candidates.into_iter().next()
+}
+
+fn resolve_dev_background_candidate(
+    install_base: &Path,
+    game: &str,
+    use_all_folder: bool,
+) -> Option<PathBuf> {
+    let app_root = install_base.join("app");
+
+    if use_all_folder {
+        return first_supported_image_in_dir(&app_root.join("all"));
+    }
+
+    first_supported_image_in_dir(&app_root.join(game))
+}
+
+fn resolve_extracted_resources_root(extract_root: &Path) -> PathBuf {
+    let nested_resources = extract_root.join("resources");
+    if nested_resources.is_dir() {
+        return nested_resources;
+    }
+
+    if let Ok(entries) = fs::read_dir(extract_root) {
+        let dirs = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+
+        if dirs.len() == 1 {
+            let inner = dirs[0].join("resources");
+            if inner.is_dir() {
+                return inner;
+            }
+
+            let looks_like_resources = STOCK_GAME_KEYS
+                .iter()
+                .any(|game| dirs[0].join(game).is_dir());
+            if looks_like_resources {
+                return dirs[0].clone();
+            }
+        }
+    }
+
+    extract_root.to_path_buf()
+}
+
+fn sync_resources_with_cleanup(extracted_root: &Path, resources_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(resources_dir).map_err(|err| err.to_string())?;
+
+    let payload_root = resolve_extracted_resources_root(extracted_root);
+    let install_base = resources_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| resources_dir.to_path_buf());
+
+    for icon_folder in ICON_DIR_CANDIDATES {
+        let source_icons = payload_root.join(icon_folder);
+        if source_icons.is_dir() {
+            let dest_name = if resources_dir.join("Icon").exists() {
+                "Icon"
+            } else if resources_dir.join("Icons").exists() {
+                "Icons"
+            } else {
+                "icons"
+            };
+            let dest_icons = resources_dir.join(dest_name);
+            replace_dir_contents(&source_icons, &dest_icons)?;
+            break;
+        }
+    }
+
+    for game in STOCK_GAME_KEYS {
+        let source_game = payload_root.join(game);
+        if source_game.is_dir() {
+            let dest_game = resources_dir.join(game);
+            replace_dir_contents(&source_game, &dest_game)?;
+        }
+    }
+
+    // If the update payload ships extractor tools, keep install/tools in sync so
+    // already-installed users get required binaries without reinstalling.
+    let source_tools = payload_root.join("tools");
+    if source_tools.is_dir() {
+        let dest_tools = install_base.join("tools");
+        fs::create_dir_all(&dest_tools).map_err(|err| err.to_string())?;
+        for entry in fs::read_dir(&source_tools).map_err(|err| err.to_string())? {
+            let entry = entry.map_err(|err| err.to_string())?;
+            let path = entry.path();
+            if path.is_file() {
+                let file_name = entry.file_name();
+                let _ = fs::copy(path, dest_tools.join(file_name));
+            }
+        }
+    }
+
+    ensure_custom_fixes_scaffold(resources_dir)?;
     Ok(())
 }
 
@@ -2689,6 +3233,21 @@ fn install_archive_mod_blocking(
             .map_err(|err| err.to_string())
     }
 
+    fn extraction_result_is_usable(output: &std::process::Output, out_dir: &Path) -> bool {
+        if output.status.success() {
+            return true;
+        }
+
+        // 7-Zip often returns 1 for warnings while still extracting usable files.
+        if output.status.code() == Some(1) {
+            if let Ok(mut entries) = fs::read_dir(out_dir) {
+                return entries.next().is_some();
+            }
+        }
+
+        false
+    }
+
     fn run_winrar_extractor(program: &Path, archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
         let program_str = program.to_string_lossy().to_string();
         let mut out_arg = out_dir.to_string_lossy().to_string();
@@ -2708,6 +3267,10 @@ fn install_archive_mod_blocking(
     }
 
     fn extract_with_7z_or_winrar(archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|dir| dir.to_path_buf()));
+
         let mut candidates: Vec<PathBuf> = vec![
             PathBuf::from("7z"),
             PathBuf::from("7z.exe"),
@@ -2722,6 +3285,25 @@ fn install_archive_mod_blocking(
             PathBuf::from(r"C:\Program Files\WinRAR\UnRAR.exe"),
             PathBuf::from(r"C:\Program Files (x86)\WinRAR\UnRAR.exe"),
         ];
+
+        if let Some(dir) = exe_dir {
+            candidates.push(dir.join("7za.exe"));
+            candidates.push(dir.join("7z.exe"));
+            candidates.push(dir.join("7zz.exe"));
+            candidates.push(dir.join("7zr.exe"));
+            candidates.push(dir.join("tools").join("7za.exe"));
+            candidates.push(dir.join("tools").join("7z.exe"));
+            candidates.push(dir.join("tools").join("7zz.exe"));
+            candidates.push(dir.join("tools").join("7zr.exe"));
+            candidates.push(dir.join("resources").join("tools").join("7za.exe"));
+            candidates.push(dir.join("resources").join("tools").join("7z.exe"));
+            candidates.push(dir.join("resources").join("tools").join("7zz.exe"));
+            candidates.push(dir.join("resources").join("tools").join("7zr.exe"));
+            candidates.push(dir.join("bin").join("7za.exe"));
+            candidates.push(dir.join("bin").join("7z.exe"));
+            candidates.push(dir.join("bin").join("7zz.exe"));
+            candidates.push(dir.join("bin").join("7zr.exe"));
+        }
 
         let winrar_candidates = vec![
             PathBuf::from(r"C:\Program Files\WinRAR\WinRAR.exe"),
@@ -2771,7 +3353,7 @@ fn install_archive_mod_blocking(
 
             match result {
                 Ok(output) => {
-                    if output.status.success() {
+                    if extraction_result_is_usable(&output, out_dir) {
                         return Ok(output);
                     }
                     last_output = Some(output);
@@ -2817,29 +3399,50 @@ fn install_archive_mod_blocking(
             .map_err(|err| format!("powershell not available: {err}"))
     };
 
+    let run_tar_extract = || {
+        background_command("tar")
+            .args([
+                "-xf",
+                source_archive.to_str().unwrap_or_default(),
+                "-C",
+                extract_dir.to_str().unwrap_or_default(),
+            ])
+            .output()
+            .map_err(|err| format!("tar not available: {err}"))
+    };
+
     let extract_output = if ext == "zip" {
         match run_expand_archive() {
             Ok(output) if output.status.success() => output,
-            _ => extract_with_7z_or_winrar(&source_archive, &extract_dir)
-                .map_err(|err| format!("Extractor unavailable for zip archive: {err}"))?,
+            Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
+            _ => match run_tar_extract() {
+                Ok(output) if output.status.success() => output,
+                Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
+                _ => extract_with_7z_or_winrar(&source_archive, &extract_dir)
+                    .map_err(|err| format!("Extractor unavailable for zip archive: {err}"))?,
+            },
         }
     } else {
-        match extract_with_7z_or_winrar(&source_archive, &extract_dir) {
-            Ok(output) => output,
-            Err(extract_err) => match run_expand_archive() {
-                Ok(zip_output) => zip_output,
-                Err(_) => {
-                    let _ = fs::remove_dir_all(&temp_root);
-                    return Err(format!(
-                        "Unsupported or unreadable archive '{}': {}",
-                        ext, extract_err
-                    ));
-                }
+        match run_tar_extract() {
+            Ok(output) if output.status.success() => output,
+            Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
+            _ => match extract_with_7z_or_winrar(&source_archive, &extract_dir) {
+                Ok(output) => output,
+                Err(extract_err) => match run_expand_archive() {
+                    Ok(zip_output) => zip_output,
+                    Err(_) => {
+                        let _ = fs::remove_dir_all(&temp_root);
+                        return Err(format!(
+                            "Unsupported or unreadable archive '{}': {}. Bundle a 7za.exe at <install>/tools/7za.exe for maximum compatibility.",
+                            ext, extract_err
+                        ));
+                    }
+                },
             },
         }
     };
 
-    if !extract_output.status.success() {
+    if !extract_output.status.success() && !extraction_result_is_usable(&extract_output, &extract_dir) {
         let _ = fs::remove_dir_all(&temp_root);
         return Err(format!(
             "Extraction failed: {}",
@@ -3412,6 +4015,8 @@ fn bootstrap_installation(
 
     let install_base = PathBuf::from(install_dir);
     fs::create_dir_all(&install_base).map_err(|err| err.to_string())?;
+    ensure_dev_app_scaffold(&install_base)?;
+    ensure_runtime_tools_scaffold(&install_base)?;
 
     let resources_dir = install_base.join("resources");
     fs::create_dir_all(&resources_dir).map_err(|err| err.to_string())?;
@@ -3467,7 +4072,17 @@ fn bootstrap_installation(
         .status()
         .map_err(|err| err.to_string())?;
     if !status.success() {
-        return Err("Failed to extract resources archive".to_string());
+        let fallback = background_command("tar")
+            .args([
+                "-xf",
+                zip_path.to_str().unwrap_or("resources_update.zip"),
+                "-C",
+                extract_path.to_str().unwrap_or("resources_update_tmp"),
+            ])
+            .status();
+        if !matches!(fallback, Ok(s) if s.success()) {
+            return Err("Failed to extract resources archive".to_string());
+        }
     }
 
     let source = {
@@ -3481,7 +4096,7 @@ fn bootstrap_installation(
             extract_path.clone()
         }
     };
-    copy_dir_recursive(&source, &resources_dir)?;
+    sync_resources_with_cleanup(&source, &resources_dir)?;
 
     let mut settings = default_settings(&install_base);
     if let Value::Object(map) = &mut settings {
@@ -3569,6 +4184,18 @@ fn download_and_update_resources(
         .parent()
         .unwrap_or(&resources_dir)
         .to_path_buf();
+    ensure_dev_app_scaffold(&parent)?;
+    ensure_runtime_tools_scaffold(&parent)?;
+
+    let remove_stock_fixes_after_update = load_settings_snapshot()
+        .ok()
+        .and_then(|settings| {
+            settings
+                .get("remove_downloaded_stock_fixes_after_update")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false);
+
     let temp_zip = parent.join("resources_update.zip");
     let temp_extract = parent.join("resources_update_tmp");
 
@@ -3605,7 +4232,18 @@ fn download_and_update_resources(
         .map_err(|err| err.to_string())?;
 
     if !status.success() {
-        return Err("Extraction failed".to_string());
+        let fallback = background_command("tar")
+            .args([
+                "-xf",
+                temp_zip.to_str().unwrap_or("resources_update.zip"),
+                "-C",
+                temp_extract.to_str().unwrap_or("resources_update_tmp"),
+            ])
+            .status();
+
+        if !matches!(fallback, Ok(s) if s.success()) {
+            return Err("Extraction failed".to_string());
+        }
     }
 
     // Find actual content (may be inside a 'resources' subfolder)
@@ -3621,8 +4259,12 @@ fn download_and_update_resources(
         }
     };
 
-    // Merge into resources dir
-    copy_dir_recursive(&source, &resources_dir)?;
+    // Replace stock resources with cleaned set while preserving user custom fixes.
+    sync_resources_with_cleanup(&source, &resources_dir)?;
+
+    if remove_stock_fixes_after_update {
+        let _ = purge_downloaded_stock_fixes(&resources_dir)?;
+    }
 
     // Record installed resources update metadata in settings.json.
     save_settings_metadata(|map| {
@@ -3655,6 +4297,38 @@ fn download_and_update_resources(
     Ok(normalize_path(&resources_dir))
 }
 
+#[tauri::command]
+fn resolve_dev_background_path(game: String, use_all_folder: bool) -> Result<Option<String>, String> {
+    let install_base = resolve_best_dev_app_base()
+        .or_else(resolve_install_base)
+        .ok_or_else(|| "Unable to determine install directory".to_string())?;
+
+    ensure_dev_app_scaffold(&install_base)?;
+    Ok(resolve_dev_background_candidate(&install_base, &game, use_all_folder)
+        .map(|path| normalize_path(&path)))
+}
+
+#[tauri::command]
+fn resolve_dev_background_data_url(game: String, use_all_folder: bool) -> Result<Option<String>, String> {
+    let install_base = resolve_best_dev_app_base()
+        .or_else(resolve_install_base)
+        .ok_or_else(|| "Unable to determine install directory".to_string())?;
+
+    ensure_dev_app_scaffold(&install_base)?;
+
+    let Some(path) = resolve_dev_background_candidate(&install_base, &game, use_all_folder) else {
+        return Ok(None);
+    };
+
+    let data_url = load_image_data_url(normalize_path(&path))?;
+    Ok(Some(data_url))
+}
+
+#[tauri::command]
+fn apply_dev_window_icon(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    apply_dev_icon_to_main_window(&app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3667,6 +4341,14 @@ pub fn run() {
                 }
 
                 if let Ok(settings) = load_settings_snapshot() {
+                    let dev_mode_enabled = settings
+                        .get("dev_mode")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if dev_mode_enabled {
+                        let _ = apply_dev_icon_to_main_window(app.handle());
+                    }
+
                     let width = settings
                         .get("window_width")
                         .and_then(Value::as_f64)
@@ -3717,6 +4399,8 @@ pub fn run() {
             find_mod_preview_images,
             load_image_data_url,
             load_images_data_urls,
+            resolve_dev_background_data_url,
+            apply_dev_window_icon,
             get_default_downloads_folder,
             default_downloads_dir,
             download_file_to_folder,
@@ -3730,6 +4414,7 @@ pub fn run() {
             sync_global_persist_for_mod,
             check_for_updates,
             download_and_update_resources,
+            resolve_dev_background_path,
             download_and_launch_updater,
             launch_local_updater,
             mark_app_update_seen,

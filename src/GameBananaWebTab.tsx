@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { Webview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, KeyRound, RefreshCw } from "lucide-react";
 import { GAME_ORDER, GAMEBANANA_URLS, GAMES } from "./config/games";
 import type { DownloadEventPayload } from "./BrowseTab";
 import type { GameKey } from "./types";
@@ -35,6 +35,8 @@ type Props = {
   rememberWebSessions?: boolean;
   enableLoginHelperHints?: boolean;
   enableAdBlocker?: boolean;
+  savedUsername?: string;
+  savedPassword?: string;
   onDownloadEvent?: (payload: DownloadEventPayload) => void;
   onGameSelect?: (game: GameKey) => void;
 };
@@ -63,6 +65,8 @@ export function GameBananaWebTab({
   rememberWebSessions = true,
   enableLoginHelperHints = true,
   enableAdBlocker = true,
+  savedUsername = "",
+  savedPassword = "",
   onDownloadEvent,
   onGameSelect,
 }: Props) {
@@ -74,6 +78,7 @@ export function GameBananaWebTab({
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [localInstallStatus, setLocalInstallStatus] = useState<string | null>(null);
+  const [autofillStatus, setAutofillStatus] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
   const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
@@ -905,6 +910,56 @@ export function GameBananaWebTab({
     setNativeError(null);
   }
 
+  async function handleAutofillSavedLogin() {
+    const username = savedUsername.trim();
+    const password = savedPassword;
+
+    if (!username || !password) {
+      setAutofillStatus("Set saved username + password in Settings first.");
+      return;
+    }
+
+    if (!canUseNativeWebview || !webviewRef.current) {
+      setAutofillStatus("Autofill works only in native in-app webview mode.");
+      return;
+    }
+
+    const script = `(() => {
+      const username = ${JSON.stringify(username)};
+      const password = ${JSON.stringify(password)};
+
+      const fill = (el, value) => {
+        if (!el || typeof el.value === 'undefined') {
+          return false;
+        }
+        el.focus();
+        el.value = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      };
+
+      const passField = document.querySelector('input[type="password"]');
+      const userField = document.querySelector('input[type="email"],input[name*="user" i],input[name*="login" i],input[name*="mail" i],input[id*="user" i],input[id*="login" i],input[id*="mail" i],input[autocomplete="username"],input[type="text"]');
+
+      if (userField) {
+        fill(userField, username);
+      }
+      if (passField) {
+        fill(passField, password);
+      }
+    })();`;
+
+    try {
+      await runWebviewScript(script);
+      setAutofillStatus("Saved login autofill applied. Submit on the page to sign in.");
+    } catch (err) {
+      setAutofillStatus(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
     <section className="mt-4">
       <article className="rounded-[28px] border border-white/10 bg-slate-950/40 p-6 shadow-[0_20px_80px_rgba(2,6,23,0.35)]">
@@ -943,8 +998,22 @@ export function GameBananaWebTab({
               <ExternalLink className="h-4 w-4" />
               Open External
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                void handleAutofillSavedLogin();
+              }}
+              className="inline-flex items-center gap-2 rounded-full border border-indigo-300/35 bg-indigo-500/20 px-4 py-2 text-sm font-medium text-indigo-100 transition hover:bg-indigo-500/30"
+            >
+              <KeyRound className="h-4 w-4" />
+              Autofill Saved Login
+            </button>
           </div>
         </div>
+
+        <p className="mt-2 text-xs text-slate-300/85">
+          Saved account: {savedUsername.trim() || "none"}
+        </p>
 
         <div className="mt-4">
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Game</p>
@@ -1058,6 +1127,9 @@ export function GameBananaWebTab({
         ) : null}
         {downloadError ? (
           <p className="mt-2 text-xs text-rose-200/90">Download install failed: {downloadError}</p>
+        ) : null}
+        {autofillStatus ? (
+          <p className="mt-2 text-xs text-indigo-100/90">{autofillStatus}</p>
         ) : null}
         {enableLoginHelperHints ? (
           <p className="mt-2 text-xs text-slate-300/85">

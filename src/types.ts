@@ -38,6 +38,17 @@ export interface Settings {
   remember_web_sessions: boolean;
   enable_login_helper_hints: boolean;
   enable_web_adblocker: boolean;
+  remove_downloaded_stock_fixes_after_update: boolean;
+  show_nextcloud_tabs: boolean;
+  show_discord_tab: boolean;
+  show_modding_sides_tab: boolean;
+  gamebanana_saved_username: string;
+  gamebanana_saved_password: string;
+  arca_saved_username: string;
+  arca_saved_password: string;
+  dev_mode: boolean;
+  dev_use_image_background: boolean;
+  dev_use_all_backgrounds: boolean;
   last_release_tag: string | null;
   install_path_info: string | null;
   last_selected_game: GameKey;

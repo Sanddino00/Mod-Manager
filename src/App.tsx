@@ -496,6 +496,9 @@ function App() {
   const [managerCharacterView, setManagerCharacterView] = useState<"grid" | "workspace">("grid");
   const [downloadRecords, setDownloadRecords] = useState<DownloadRecord[]>([]);
   const [lastDownloadFolder, setLastDownloadFolder] = useState<string | null>(null);
+  const [devBackgroundPath, setDevBackgroundPath] = useState<string | null>(null);
+  const [devBackgroundDataUrl, setDevBackgroundDataUrl] = useState<string | null>(null);
+  const [devIconStatus, setDevIconStatus] = useState<string | null>(null);
 
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [dragDropMsg, setDragDropMsg] = useState<string | null>(null);
@@ -513,6 +516,25 @@ function App() {
   const rememberWebSessions = Boolean(draftSettings?.remember_web_sessions ?? persistedSettings?.remember_web_sessions ?? true);
   const enableLoginHelperHints = Boolean(draftSettings?.enable_login_helper_hints ?? persistedSettings?.enable_login_helper_hints ?? true);
   const enableWebAdblocker = Boolean(draftSettings?.enable_web_adblocker ?? persistedSettings?.enable_web_adblocker ?? true);
+  const removeDownloadedStockFixesAfterUpdate = Boolean(
+    draftSettings?.remove_downloaded_stock_fixes_after_update
+      ?? persistedSettings?.remove_downloaded_stock_fixes_after_update
+      ?? false,
+  );
+  const showNextcloudTabs = Boolean(draftSettings?.show_nextcloud_tabs ?? persistedSettings?.show_nextcloud_tabs ?? true);
+  const showDiscordTab = Boolean(draftSettings?.show_discord_tab ?? persistedSettings?.show_discord_tab ?? true);
+  const showModdingSidesTab = Boolean(draftSettings?.show_modding_sides_tab ?? persistedSettings?.show_modding_sides_tab ?? true);
+  const gameBananaSavedUsername = (draftSettings?.gamebanana_saved_username ?? persistedSettings?.gamebanana_saved_username ?? "").trim();
+  const gameBananaSavedPassword = draftSettings?.gamebanana_saved_password ?? persistedSettings?.gamebanana_saved_password ?? "";
+  const arcaSavedUsername = (draftSettings?.arca_saved_username ?? persistedSettings?.arca_saved_username ?? "").trim();
+  const arcaSavedPassword = draftSettings?.arca_saved_password ?? persistedSettings?.arca_saved_password ?? "";
+  const devModeEnabled = Boolean(draftSettings?.dev_mode ?? persistedSettings?.dev_mode ?? false);
+  const devUseImageBackground = Boolean(
+    draftSettings?.dev_use_image_background ?? persistedSettings?.dev_use_image_background ?? false,
+  );
+  const devUseAllBackgrounds = Boolean(
+    draftSettings?.dev_use_all_backgrounds ?? persistedSettings?.dev_use_all_backgrounds ?? false,
+  );
   const highlightedGame = activeGame ?? persistedSettings?.last_selected_game ?? "gi";
   const highlightedGameConfig = GAMES[highlightedGame];
   const activeGameTheme = GAME_THEME_SKINS[highlightedGame];
@@ -582,6 +604,15 @@ function App() {
   const gameAccentMedium = alphaColor(gameAccent, 0.28, "rgba(56, 189, 248, 0.28)");
   const gameAccentSoft = alphaColor(gameAccent, 0.16, "rgba(56, 189, 248, 0.16)");
   const gameAccentFaint = alphaColor(gameAccent, 0.1, "rgba(56, 189, 248, 0.1)");
+  const devBackgroundStyle: CSSProperties | undefined = (devBackgroundDataUrl || devBackgroundPath)
+    ? {
+        backgroundImage: `linear-gradient(rgba(2, 6, 23, 0.56), rgba(2, 6, 23, 0.48)), url(${devBackgroundDataUrl ?? toAssetSrc(devBackgroundPath ?? "")})`,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+        backgroundRepeat: "no-repeat",
+        backgroundAttachment: "fixed",
+      }
+    : undefined;
 
   const gameAccentPillStyle: CSSProperties | undefined = isGameTheme
     ? {
@@ -630,6 +661,92 @@ function App() {
     themeMode === "light"
       ? "w-full rounded-xl border border-slate-300/75 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder:text-slate-500"
       : "w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 font-mono text-sm text-white";
+
+  useEffect(() => {
+    if (activeTab === "discord" && !showDiscordTab) {
+      setActiveTab("manager");
+      return;
+    }
+
+    if (activeTab === "modding-sites" && !showModdingSidesTab) {
+      setActiveTab("manager");
+      return;
+    }
+
+    if (activeTab === "nextcloud-side" && !showNextcloudTabs) {
+      setActiveTab("manager");
+      return;
+    }
+  }, [activeTab, showDiscordTab, showModdingSidesTab, showNextcloudTabs]);
+
+  useEffect(() => {
+    if (!showNextcloudTabs && activeModdingSiteTab === "nextcloud") {
+      setActiveModdingSiteTab("gbweb");
+    }
+  }, [activeModdingSiteTab, showNextcloudTabs]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!devModeEnabled || !devUseImageBackground) {
+      setDevBackgroundPath(null);
+      setDevBackgroundDataUrl(null);
+      return;
+    }
+
+    void invoke<string | null>("resolve_dev_background_path", {
+      game: highlightedGame,
+      useAllFolder: devUseAllBackgrounds,
+    })
+      .then((path) => {
+        if (!cancelled) {
+          setDevBackgroundPath(path ?? null);
+          if (!path) {
+            setDevBackgroundDataUrl(null);
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDevBackgroundPath(null);
+          setDevBackgroundDataUrl(null);
+        }
+      });
+
+    void invoke<string | null>("resolve_dev_background_data_url", {
+      game: highlightedGame,
+      useAllFolder: devUseAllBackgrounds,
+    })
+      .then((dataUrl) => {
+        if (!cancelled) {
+          setDevBackgroundDataUrl(dataUrl ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDevBackgroundDataUrl(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [devModeEnabled, devUseImageBackground, devUseAllBackgrounds, highlightedGame]);
+
+  useEffect(() => {
+    if (!devModeEnabled) {
+      setDevIconStatus(null);
+      return;
+    }
+
+    void invoke<string | null>("apply_dev_window_icon")
+      .then((path) => {
+        setDevIconStatus(path ? `Applied icon: ${path}` : "No icon file found in app/icon or app root.");
+      })
+      .catch((err) => {
+        setDevIconStatus(`Icon apply failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+  }, [devModeEnabled]);
 
   async function pickFolder(initial?: string) {
     const picked = await open({
@@ -1633,6 +1750,15 @@ function App() {
           ? `Settings saved. ${scaffoldNotes.join(" | ")}`
           : "Settings saved.",
       );
+      if (draftSettings.dev_mode) {
+        void invoke<string | null>("apply_dev_window_icon")
+          .then((path) => {
+            setDevIconStatus(path ? `Applied icon: ${path}` : "No icon file found in app/icon or app root.");
+          })
+          .catch((err) => {
+            setDevIconStatus(`Icon apply failed: ${err instanceof Error ? err.message : String(err)}`);
+          });
+      }
       await refresh();
     } catch (saveError) {
       setSaveMessage(saveError instanceof Error ? saveError.message : String(saveError));
@@ -1906,7 +2032,10 @@ function App() {
     if (!info?.resources_url) return;
 
     const resourceTag = info.resources_latest_tag ?? info.latest_tag ?? "latest";
-    const approve = window.confirm(`Download resources update v${resourceTag} now?`);
+    const purgeHint = removeDownloadedStockFixesAfterUpdate
+      ? "\n\nStock downloaded fixes will be deleted after update (custom fixes remain)."
+      : "";
+    const approve = window.confirm(`Download resources update v${resourceTag} now?${purgeHint}`);
     if (!approve) {
       return;
     }
@@ -2137,7 +2266,11 @@ function App() {
   }
 
   return (
-    <main className={clsx(shellClassName, "min-h-dvh")} onContextMenu={(event) => event.preventDefault()}>
+    <main
+      className={clsx(shellClassName, "min-h-dvh")}
+      onContextMenu={(event) => event.preventDefault()}
+      style={devBackgroundStyle}
+    >
       {isDraggingOver && (
         <div
           className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center rounded-2xl border-4 border-dashed border-cyan-400/70 bg-cyan-400/10 backdrop-blur-sm"
@@ -2212,54 +2345,60 @@ function App() {
               <HardDriveDownload className="h-4 w-4" />
               Downloads
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("modding-sites");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "modding-sites"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "modding-sites" ? navActiveStyle : navIdleStyle}
-            >
-              <Globe className="h-4 w-4" />
-              Modding Sides
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("discord");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "discord"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "discord" ? navActiveStyle : navIdleStyle}
-            >
-              <MessageCircle className="h-4 w-4" />
-              Discord
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("nextcloud-side");
-              }}
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                activeTab === "nextcloud-side"
-                  ? navActiveClassName
-                  : navIdleClassName,
-              )}
-              style={activeTab === "nextcloud-side" ? navActiveStyle : navIdleStyle}
-            >
-              <Link2 className="h-4 w-4" />
-              Nexcloud Side
-            </button>
+            {showModdingSidesTab ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("modding-sites");
+                }}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  activeTab === "modding-sites"
+                    ? navActiveClassName
+                    : navIdleClassName,
+                )}
+                style={activeTab === "modding-sites" ? navActiveStyle : navIdleStyle}
+              >
+                <Globe className="h-4 w-4" />
+                Modding Sides
+              </button>
+            ) : null}
+            {showDiscordTab ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("discord");
+                }}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  activeTab === "discord"
+                    ? navActiveClassName
+                    : navIdleClassName,
+                )}
+                style={activeTab === "discord" ? navActiveStyle : navIdleStyle}
+              >
+                <MessageCircle className="h-4 w-4" />
+                Discord
+              </button>
+            ) : null}
+            {showNextcloudTabs ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("nextcloud-side");
+                }}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  activeTab === "nextcloud-side"
+                    ? navActiveClassName
+                    : navIdleClassName,
+                )}
+                style={activeTab === "nextcloud-side" ? navActiveStyle : navIdleStyle}
+              >
+                <Link2 className="h-4 w-4" />
+                Nexcloud Side
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => {
@@ -2581,10 +2720,10 @@ function App() {
               void handleGameSelect(gameId);
             }}
           />
-        ) : activeTab === "modding-sites" ? (
+        ) : activeTab === "modding-sites" && showModdingSidesTab ? (
           <section className="mt-4 space-y-4">
             <div className={clsx("rounded-[24px] p-4", panelClassName)}>
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className={clsx("grid gap-3", showNextcloudTabs ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
                 <button
                   type="button"
                   onClick={() => {
@@ -2613,20 +2752,22 @@ function App() {
                 >
                   Arca
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveModdingSiteTab("nextcloud");
-                  }}
-                  className={clsx(
-                    "rounded-2xl border px-4 py-4 text-sm font-semibold transition",
-                    activeModdingSiteTab === "nextcloud"
-                      ? "border-cyan-300/45 bg-cyan-500/20 text-cyan-100"
-                      : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
-                  )}
-                >
-                  Nextcloud Public Share
-                </button>
+                {showNextcloudTabs ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveModdingSiteTab("nextcloud");
+                    }}
+                    className={clsx(
+                      "rounded-2xl border px-4 py-4 text-sm font-semibold transition",
+                      activeModdingSiteTab === "nextcloud"
+                        ? "border-cyan-300/45 bg-cyan-500/20 text-cyan-100"
+                        : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
+                    )}
+                  >
+                    Nextcloud Public Share
+                  </button>
+                ) : null}
               </div>
             </div>
 
@@ -2637,6 +2778,8 @@ function App() {
                 rememberWebSessions={rememberWebSessions}
                 enableLoginHelperHints={enableLoginHelperHints}
                 enableAdBlocker={enableWebAdblocker}
+                savedUsername={gameBananaSavedUsername}
+                savedPassword={gameBananaSavedPassword}
                 onDownloadEvent={handleDownloadEvent}
                 onGameSelect={(gameId) => {
                   void handleGameSelect(gameId);
@@ -2648,9 +2791,11 @@ function App() {
                 rememberWebSessions={rememberWebSessions}
                 enableLoginHelperHints={enableLoginHelperHints}
                 enableAdBlocker={enableWebAdblocker}
+                savedUsername={arcaSavedUsername}
+                savedPassword={arcaSavedPassword}
                 onDownloadEvent={handleDownloadEvent}
               />
-            ) : (
+            ) : showNextcloudTabs ? (
               <NextcloudTab
                 game={highlightedGame}
                 gameModRoot={currentModRoot}
@@ -2667,9 +2812,9 @@ function App() {
                   void handleGameSelect(gameId);
                 }}
               />
-            )}
+            ) : null}
           </section>
-        ) : activeTab === "nextcloud-side" ? (
+        ) : activeTab === "nextcloud-side" && showNextcloudTabs ? (
           <NextcloudTab
             game={highlightedGame}
             gameModRoot={currentModRoot}
@@ -2691,7 +2836,7 @@ function App() {
               void handleGameSelect(gameId);
             }}
           />
-        ) : activeTab === "discord" ? (
+        ) : activeTab === "discord" && showDiscordTab ? (
           <DiscordTab rememberWebSessions={rememberWebSessions} />
         ) : (
           <>
@@ -3522,6 +3667,20 @@ function App() {
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
+                      checked={Boolean(draftSettings?.dev_mode ?? false)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, dev_mode: nextValue }));
+                      }}
+                    />
+                    Dev Mode (shows dev customization options below)
+                  </label>
+                  <p className="rounded-xl border border-amber-300/35 bg-amber-500/12 px-3 py-2 text-xs text-amber-100">
+                    Warning: Dev Mode uses experimental features and should stay disabled for normal use.
+                  </p>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
                       checked={Boolean(draftSettings?.auto_check_updates)}
                       onChange={(event) => {
                         const nextValue = event.currentTarget.checked;
@@ -3574,8 +3733,157 @@ function App() {
                     />
                     Enable built-in basic ad/tracker blocking for web tabs
                   </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.remove_downloaded_stock_fixes_after_update ?? false)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, remove_downloaded_stock_fixes_after_update: nextValue }));
+                      }}
+                    />
+                    After resources update, delete downloaded stock fixes (custom fixes only)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.show_modding_sides_tab ?? true)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, show_modding_sides_tab: nextValue }));
+                      }}
+                    />
+                    Show Modding Sides tab
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.show_discord_tab ?? true)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, show_discord_tab: nextValue }));
+                      }}
+                    />
+                    Show Discord tab
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draftSettings?.show_nextcloud_tabs ?? true)}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.checked;
+                        updateDraftSettings((current) => ({ ...current, show_nextcloud_tabs: nextValue }));
+                      }}
+                    />
+                    Show Nextcloud tabs (public share + side)
+                  </label>
                 </div>
               </label>
+
+              <section className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Quick Login Save (Arca + GameBanana)</span>
+                <p className="mt-2 text-xs text-slate-400">
+                  Stores credentials locally in settings for quick autofill in in-app browser tabs.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="rounded-xl border border-white/8 bg-slate-950/45 p-3">
+                    <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">GameBanana Username</span>
+                    <input
+                      value={draftSettings?.gamebanana_saved_username ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        updateDraftSettings((current) => ({ ...current, gamebanana_saved_username: nextValue }));
+                      }}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                      placeholder="username or email"
+                    />
+                  </label>
+                  <label className="rounded-xl border border-white/8 bg-slate-950/45 p-3">
+                    <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">GameBanana Password</span>
+                    <input
+                      type="password"
+                      value={draftSettings?.gamebanana_saved_password ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        updateDraftSettings((current) => ({ ...current, gamebanana_saved_password: nextValue }));
+                      }}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                      placeholder="saved password"
+                    />
+                  </label>
+                  <label className="rounded-xl border border-white/8 bg-slate-950/45 p-3">
+                    <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Arca Username</span>
+                    <input
+                      value={draftSettings?.arca_saved_username ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        updateDraftSettings((current) => ({ ...current, arca_saved_username: nextValue }));
+                      }}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                      placeholder="username or email"
+                    />
+                  </label>
+                  <label className="rounded-xl border border-white/8 bg-slate-950/45 p-3">
+                    <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Arca Password</span>
+                    <input
+                      type="password"
+                      value={draftSettings?.arca_saved_password ?? ""}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        updateDraftSettings((current) => ({ ...current, arca_saved_password: nextValue }));
+                      }}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                      placeholder="saved password"
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Developer Mode</span>
+                <div className="mt-3 space-y-2 text-sm text-slate-200">
+                  <p className="rounded-xl border border-amber-300/35 bg-amber-500/12 px-3 py-2 text-xs text-amber-100">
+                    Experimental only: keep Dev Mode disabled unless you are testing custom icon/background behavior.
+                  </p>
+                  {Boolean(draftSettings?.dev_mode ?? false) ? (
+                    <>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draftSettings?.dev_use_image_background ?? false)}
+                          onChange={(event) => {
+                            const nextValue = event.currentTarget.checked;
+                            updateDraftSettings((current) => ({ ...current, dev_use_image_background: nextValue }));
+                          }}
+                        />
+                        Use image background (toggle image vs normal)
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draftSettings?.dev_use_all_backgrounds ?? false)}
+                          onChange={(event) => {
+                            const nextValue = event.currentTarget.checked;
+                            updateDraftSettings((current) => ({ ...current, dev_use_all_backgrounds: nextValue }));
+                          }}
+                        />
+                        Use app/all backgrounds for all games (off = per-game folders)
+                      </label>
+                      <p className="text-xs text-slate-400">
+                        Folder layout: {`${state?.exe_dir ?? "<exe-dir>"}/app`} with icon/, all/, gi/, hsr/, wuwa/, zzz/, end/. Any supported image file name works.
+                      </p>
+                      {Boolean(draftSettings?.dev_use_image_background ?? false) ? (
+                        <p className="text-xs text-slate-400">
+                          Active background file: {devBackgroundPath ?? "none detected in selected app folder"}
+                        </p>
+                      ) : null}
+                      <p className="text-xs text-slate-400">
+                        Icon status: {devIconStatus ?? "not applied yet"}
+                      </p>
+                    </>
+                  ) : null}
+                </div>
+              </section>
             </div>
 
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
