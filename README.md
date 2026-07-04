@@ -10,7 +10,7 @@ Features:
 
 -Mod-Fix managment / use 
 
--Downloading RabbitFx/TexFx and Orfix(API)
+-Downloading RabbitFx/TexFx and Orfix(API)[later is for gimi not xxmi]
 
 -Drag and drop to add mods
 
@@ -20,8 +20,15 @@ Features:
 
 -Creation of a folder structure inside of the mod folder
 
+-in app support for discord
+
+-site support for gamebanana, arca live and nextcloud or google drive [hopefully]
+
 Setup Stuff:
--
+--
+-links for nextcloud/googledrive need to be added via settings
+
+
 Included Fixes:
 --
 -Swap key saver all games
