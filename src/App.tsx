@@ -457,6 +457,7 @@ function App() {
   const [renameModBusy, setRenameModBusy] = useState(false);
   const [favoriteItemId, setFavoriteItemId] = useState<string | null>(null);
   const [runningFix, setRunningFix] = useState<string | null>(null);
+  const [launchingFixSource, setLaunchingFixSource] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<PrimaryTab>("manager");
   const [activeModdingSiteTab, setActiveModdingSiteTab] = useState<ModdingSiteTab>("gbweb");
   const [importSource, setImportSource] = useState("");
@@ -1897,6 +1898,22 @@ function App() {
       setSaveMessage(runError instanceof Error ? runError.message : String(runError));
     } finally {
       setRunningFix(null);
+    }
+  }
+
+  async function handleLaunchFixFromSource(scriptName: string) {
+    setLaunchingFixSource(scriptName);
+
+    try {
+      await invoke("launch_fix_script_source", {
+        game: highlightedGame,
+        scriptName,
+      });
+      setSaveMessage(`Launched ${scriptName} from its source folder.`);
+    } catch (launchError) {
+      setSaveMessage(launchError instanceof Error ? launchError.message : String(launchError));
+    } finally {
+      setLaunchingFixSource(null);
     }
   }
 
@@ -4198,16 +4215,29 @@ function App() {
                           <p className="truncate text-sm font-medium text-white" title={script.name}>{script.name}</p>
                           <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-400">{script.kind}</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleRunFix(script.name);
-                          }}
-                          disabled={runningFix === script.name || !activeScriptTarget}
-                          className="shrink-0 rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
-                        >
-                          {runningFix === script.name ? "Starting..." : "Run"}
-                        </button>
+                        <div className="shrink-0 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleLaunchFixFromSource(script.name);
+                            }}
+                            disabled={launchingFixSource === script.name}
+                            className="rounded-full border border-emerald-300/30 bg-emerald-400/18 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-400/28 disabled:cursor-wait disabled:opacity-70"
+                            title="Launch from fix source folder"
+                          >
+                            {launchingFixSource === script.name ? "Launching..." : "Launch"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleRunFix(script.name);
+                            }}
+                            disabled={runningFix === script.name || !activeScriptTarget}
+                            className="rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                          >
+                            {runningFix === script.name ? "Starting..." : "Run"}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))

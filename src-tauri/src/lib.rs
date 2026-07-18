@@ -1755,6 +1755,68 @@ fn run_fix_script(game: String, script_name: String, target_path: String) -> Res
 }
 
 #[tauri::command]
+fn launch_fix_script_source(game: String, script_name: String) -> Result<(), String> {
+    let resources_dir = resolve_resources_dir()?;
+    ensure_custom_fixes_scaffold(&resources_dir)?;
+
+    let custom_script_path = resources_dir
+        .join(CUSTOM_FIXES_DIR_NAME)
+        .join(&game)
+        .join(&script_name);
+    let stock_script_path = resources_dir.join(&game).join(&script_name);
+    let script_path = if custom_script_path.is_file() {
+        custom_script_path
+    } else {
+        stock_script_path
+    };
+
+    if !script_path.is_file() {
+        return Err("Script not found".to_string());
+    }
+
+    let source_dir = script_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| resources_dir.clone());
+
+    #[cfg(target_os = "windows")]
+    {
+        let extension = script_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if extension == "py" {
+            let run_cmd = format!("python -u '{}'", script_path.display());
+
+            Command::new("powershell")
+                .current_dir(&source_dir)
+                .args(["-NoExit", "-Command", &run_cmd])
+                .spawn()
+                .map_err(|err| err.to_string())?;
+        } else {
+            let run_cmd = format!("& '{}'", script_path.display());
+            Command::new("powershell")
+                .current_dir(&source_dir)
+                .args(["-NoExit", "-Command", &run_cmd])
+                .spawn()
+                .map_err(|err| err.to_string())?;
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new(&script_path)
+            .current_dir(source_dir)
+            .spawn()
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn load_mod_details(path: String) -> Result<ModDetailSummary, String> {
     let mod_path = PathBuf::from(&path);
     if !mod_path.is_dir() {
@@ -4390,6 +4452,7 @@ pub fn run() {
             toggle_item_favorite,
             load_fixes_panel,
             run_fix_script,
+            launch_fix_script_source,
             load_mod_details,
             open_in_explorer,
             import_mod_folder,
