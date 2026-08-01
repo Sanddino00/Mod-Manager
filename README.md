@@ -20,7 +20,7 @@ Features:
 
 -Creation of a folder structure inside of the mod folder
 
--in app support for discord
+-in app support for discord (still in development)
 
 -site support for gamebanana, arca live and nextcloud or google drive [hopefully]
 
