@@ -562,13 +562,22 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
 
           const href = anchor.href || '';
           const explicitDownload = anchor.hasAttribute('download');
-          if (!href || (!explicitDownload && !isDownloadUrl(href))) {
+          if (!href) {
             return;
           }
 
-          stopEvent(event);
-          const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
-          emitDownload(href, fileName || document.title || 'download');
+          if (explicitDownload || isDownloadUrl(href)) {
+            stopEvent(event);
+            const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
+            emitDownload(href, fileName || document.title || 'download');
+            return;
+          }
+
+          const targetAttr = (anchor.getAttribute('target') || '').toLowerCase();
+          if (targetAttr === '_blank') {
+            stopEvent(event);
+            window.location.href = toAbsoluteUrl(href);
+          }
         }, true);
 
         document.addEventListener('submit', (event) => {
@@ -585,6 +594,10 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
         if (originalOpen) {
           window.open = function(url, target, features) {
             if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
+              return null;
+            }
+            if (typeof url === 'string') {
+              window.location.href = toAbsoluteUrl(url);
               return null;
             }
             return originalOpen(url, target, features);
@@ -647,9 +660,9 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
   return (
     <section className="mt-4">
       <article className="rounded-[28px] border border-white/10 bg-slate-950/40 p-6 shadow-[0_20px_80px_rgba(2,6,23,0.35)]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="sticky top-24 z-20 rounded-2xl border border-white/10 bg-slate-950/80 p-3 backdrop-blur-md">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Nextcloud Shared Links</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Cloud Shared Links</p>
             <h2 className="mt-2 text-xl font-semibold text-white">Native In-App Browser</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -712,12 +725,12 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
           </div>
           {!selectedLink ? (
             <p className="mt-3 text-xs text-amber-200/90">
-              No Nextcloud link configured for {GAMES[selectedGame].name}. Add it in Settings.
+              No cloud link configured for {GAMES[selectedGame].name}. Add it in Settings.
             </p>
           ) : null}
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="sticky top-[7.4rem] z-20 mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/80 p-2 backdrop-blur-md">
           <input
             value={addressInput}
             onChange={(event) => {
@@ -778,7 +791,7 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
           <div ref={panelRef} className="relative h-[70dvh] overflow-hidden rounded-xl border border-white/10 bg-slate-950/80">
             {!browserUrl ? (
               <div className="absolute inset-0 flex items-center justify-center bg-slate-950/85 text-xs text-slate-300">
-                Add a Nextcloud link in Settings and click Load Selected.
+                Add a cloud link in Settings and click Load Selected.
               </div>
             ) : !canUseNativeWebview ? (
               <iframe

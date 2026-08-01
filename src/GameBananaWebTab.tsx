@@ -524,6 +524,7 @@ export function GameBananaWebTab({
         (window).__modManagerGbDownloadHookInstalled = true;
 
         const isDownloadUrl = (url) => /\\/dl\\/|\\bdownloads?\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+        const URL_RE = /https?:\\/\\/[^\\s"'<>]+/i;
 
         const toAbsoluteUrl = (value) => {
           try {
@@ -558,6 +559,14 @@ export function GameBananaWebTab({
           if (typeof event.stopImmediatePropagation === 'function') {
             event.stopImmediatePropagation();
           }
+        };
+
+        const openUrlInPanel = (href) => {
+          const absolute = toAbsoluteUrl(href);
+          if (!absolute) {
+            return;
+          }
+          window.location.href = absolute;
         };
 
         const pickAttr = (el, names) => {
@@ -634,6 +643,19 @@ export function GameBananaWebTab({
           return /\\b(download|get file|install)\\b/.test(text);
         };
 
+        const findUrlInNodeText = (node) => {
+          let current = node;
+          for (let depth = 0; depth < 5 && current; depth += 1) {
+            const text = String(current.textContent || '').trim();
+            const match = text.match(URL_RE);
+            if (match && match[0]) {
+              return match[0];
+            }
+            current = current.parentElement || null;
+          }
+          return '';
+        };
+
         const handleIntent = (event) => {
           const target = event.target;
           if (!target || !target.closest) {
@@ -665,6 +687,48 @@ export function GameBananaWebTab({
         document.addEventListener('auxclick', handleIntent, true);
         document.addEventListener('mousedown', handleIntent, true);
         document.addEventListener('pointerdown', handleIntent, true);
+
+        document.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!target || !target.closest) {
+            return;
+          }
+
+          const anchor = target.closest('a[href], area[href]');
+          if (anchor) {
+            const href = anchor.getAttribute('href') || anchor.href || '';
+            if (!href) {
+              return;
+            }
+
+            const targetAttr = (anchor.getAttribute('target') || '').toLowerCase();
+            const rel = (anchor.getAttribute('rel') || '').toLowerCase();
+            const shouldForcePanelNav = targetAttr === '_blank' || rel.includes('external');
+
+            if (shouldForcePanelNav) {
+              stopEvent(event);
+              openUrlInPanel(href);
+            }
+
+            const rawHref = String(anchor.getAttribute('href') || '').trim();
+            if (!rawHref || rawHref === '#' || /^javascript:/i.test(rawHref)) {
+              const hinted =
+                (anchor.getAttribute('data-href') || anchor.getAttribute('data-url') || '').trim()
+                || findUrlInNodeText(anchor);
+              if (hinted) {
+                stopEvent(event);
+                openUrlInPanel(hinted);
+              }
+            }
+            return;
+          }
+
+          const textUrl = findUrlInNodeText(target);
+          if (textUrl) {
+            stopEvent(event);
+            openUrlInPanel(textUrl);
+          }
+        }, true);
 
         document.addEventListener('submit', (event) => {
           const form = event.target;
@@ -733,6 +797,10 @@ export function GameBananaWebTab({
           const originalOpen = window.open.bind(window);
           window.open = function(url, target, features) {
             if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
+              return null;
+            }
+            if (typeof url === 'string') {
+              openUrlInPanel(url);
               return null;
             }
             return originalOpen(url, target, features);
@@ -963,7 +1031,7 @@ export function GameBananaWebTab({
   return (
     <section className="mt-4">
       <article className="rounded-[28px] border border-white/10 bg-slate-950/40 p-6 shadow-[0_20px_80px_rgba(2,6,23,0.35)]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="sticky top-24 z-20 rounded-2xl border border-white/10 bg-slate-950/80 p-3 backdrop-blur-md">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">GameBanana Website</p>
             <h2 className="mt-2 text-xl font-semibold text-white">Native In-App Browser</h2>
@@ -1039,7 +1107,7 @@ export function GameBananaWebTab({
           </div>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <div className="sticky top-[7.4rem] z-20 mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/80 p-2 backdrop-blur-md">
           <input
             value={addressInput}
             onChange={(event) => {

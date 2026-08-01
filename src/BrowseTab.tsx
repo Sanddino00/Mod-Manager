@@ -40,7 +40,7 @@ interface DownloadInstallResult {
 
 export interface DownloadEventPayload {
   kind: "start" | "success" | "error";
-  source?: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "manager";
+  source?: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "discord" | "manager";
   id: string;
   modName: string;
   fileName: string;

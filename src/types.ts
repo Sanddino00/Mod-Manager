@@ -32,6 +32,8 @@ export interface Settings {
   nextcloud_links: Record<GameKey, string>;
   nextcloud_side_link: string;
   theme: string;
+  language: "en" | "de";
+  mod_sort_order: "name" | "time_added";
   script_targets: Record<string, string>;
   version: string;
   auto_check_updates: boolean;
@@ -49,6 +51,7 @@ export interface Settings {
   dev_mode: boolean;
   dev_use_image_background: boolean;
   dev_use_all_backgrounds: boolean;
+  dev_enable_model_preview_tab: boolean;
   last_release_tag: string | null;
   install_path_info: string | null;
   last_selected_game: GameKey;
@@ -81,6 +84,7 @@ export interface ModEntrySummary {
   display_name: string;
   path: string;
   disabled: boolean;
+  time_added_epoch?: number | null;
 }
 
 export interface ItemScanSummary {

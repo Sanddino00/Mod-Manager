@@ -578,15 +578,27 @@ export function ArcaTab({
         (window).__modManagerArcaDownloadHookInstalled = true;
 
         const isDownloadUrl = (url) => /\\/dl\\/|download|attachment/i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
+        const URL_RE = /https?:\\/\\/[^\\s"'<>]+/i;
+        const toAbsoluteUrl = (value) => {
+          try {
+            return new URL(String(value || ''), window.location.href).href;
+          } catch {
+            return String(value || '');
+          }
+        };
 
         const emitDownload = (href, fileName) => {
-          if (!href || !isDownloadUrl(href)) {
+          if (!href) {
+            return false;
+          }
+          const absolute = toAbsoluteUrl(href);
+          if (!absolute || !isDownloadUrl(absolute)) {
             return false;
           }
           if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
             void window.__TAURI_INTERNALS__.invoke('emit_web_download_request', {
               source: 'arca',
-              url: href,
+              url: absolute,
               fileName: (fileName || '').trim(),
             }).catch(() => {});
             return true;
@@ -602,12 +614,30 @@ export function ArcaTab({
           }
         };
 
+        const findUrlInNodeText = (node) => {
+          let current = node;
+          for (let depth = 0; depth < 5 && current; depth += 1) {
+            const text = String(current.textContent || '').trim();
+            const match = text.match(URL_RE);
+            if (match && match[0]) {
+              return match[0];
+            }
+            current = current.parentElement || null;
+          }
+          return '';
+        };
+
         document.addEventListener('click', (event) => {
           const target = event.target;
           const anchor = target && target.closest ? target.closest('a[href], area[href]') : null;
           if (!anchor) {
             const button = target && target.closest ? target.closest('button, [role="button"]') : null;
             if (!button) {
+              const textUrl = findUrlInNodeText(target);
+              if (textUrl && /^https?:\/\//i.test(textUrl)) {
+                stopEvent(event);
+                window.location.href = toAbsoluteUrl(textUrl);
+              }
               return;
             }
             const text = (button.textContent || '').trim();
@@ -619,13 +649,43 @@ export function ArcaTab({
           }
           const href = anchor.href || '';
           const explicitDownload = anchor.hasAttribute('download');
-          if (!href || (!explicitDownload && !isDownloadUrl(href))) {
+          if (!href) {
             return;
           }
-          stopEvent(event);
-          const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
-          if (!emitDownload(href, fileName)) {
-            window.location.href = href;
+
+          if (explicitDownload || isDownloadUrl(href)) {
+            stopEvent(event);
+            const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
+            if (!emitDownload(href, fileName)) {
+              window.location.href = toAbsoluteUrl(href);
+            }
+            return;
+          }
+
+          const rawHref = String(anchor.getAttribute('href') || '').trim();
+          if (!rawHref || rawHref === '#' || /^javascript:/i.test(rawHref)) {
+            const hinted =
+              (anchor.getAttribute('data-href') || anchor.getAttribute('data-url') || '').trim()
+              || findUrlInNodeText(anchor);
+            if (hinted) {
+              stopEvent(event);
+              window.location.href = toAbsoluteUrl(hinted);
+            }
+          }
+        }, true);
+
+        document.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!target || !target.closest) {
+            return;
+          }
+          const button = target.closest('button, [role="button"]');
+          if (button) {
+            const text = (button.textContent || '').trim();
+            const explicitHref = (button.getAttribute && (button.getAttribute('data-href') || button.getAttribute('data-download-url'))) || '';
+            if (emitDownload(explicitHref, text)) {
+              stopEvent(event);
+            }
           }
         }, true);
 
@@ -905,10 +965,10 @@ export function ArcaTab({
   }
 
   return (
-    <section className="mt-4 xl:overflow-hidden">
+    <section className="mt-4">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_310px] xl:items-start">
         <article className="rounded-[28px] border border-white/10 bg-slate-950/40 p-6 shadow-[0_20px_80px_rgba(2,6,23,0.35)]">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="sticky top-24 z-20 rounded-2xl border border-white/10 bg-slate-950/80 p-3 backdrop-blur-md">
             <div>
               <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Arca Browser</p>
               <h2 className="mt-2 text-xl font-semibold text-white">Native In-App View</h2>
@@ -1015,7 +1075,7 @@ export function ArcaTab({
             </div>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="sticky top-[7.4rem] z-20 mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/80 p-2 backdrop-blur-md">
             <input
               value={addressInput}
               onChange={(event) => {

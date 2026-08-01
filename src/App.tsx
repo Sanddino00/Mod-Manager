@@ -35,6 +35,7 @@ import type { DownloadEventPayload } from "./BrowseTab";
 import { ArcaTab } from "./ArcaTab";
 import { DiscordTab } from "./DiscordTab";
 import { GameBananaWebTab } from "./GameBananaWebTab";
+import { ModelPreviewTab } from "./ModelPreviewTab";
 import { NextcloudTab } from "./NextcloudTab";
 import type {
   BootstrapState,
@@ -53,7 +54,7 @@ type ThemeMode = "dark" | "light" | "game";
 
 type DownloadRecord = {
   id: string;
-  source: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "manager";
+  source: "mod-browser" | "gamebanana" | "arca" | "nextcloud" | "discord" | "manager";
   status: "downloading" | "done" | "error";
   modName: string;
   fileName: string;
@@ -64,6 +65,30 @@ type DownloadRecord = {
   startedAt: number;
   finishedAt?: number;
 };
+
+type AppLanguage = "en" | "de";
+
+function normalizeLanguage(value: string | null | undefined): AppLanguage {
+  return value === "de" ? "de" : "en";
+}
+
+function formatEpochLabel(epochSeconds: number | null | undefined, language: AppLanguage): string {
+  if (!epochSeconds || !Number.isFinite(epochSeconds) || epochSeconds <= 0) {
+    return language === "de" ? "Unbekannt" : "Unknown";
+  }
+
+  const date = new Date(epochSeconds * 1000);
+  return date.toLocaleString(language === "de" ? "de-DE" : "en-US");
+}
+
+function formatDownloadSourceLabel(source: DownloadRecord["source"]): string {
+  if (source === "mod-browser") return "Mod Browser";
+  if (source === "gamebanana") return "GameBanana";
+  if (source === "nextcloud") return "Cloud";
+  if (source === "discord") return "Discord";
+  if (source === "arca") return "Arca";
+  return "Manager";
+}
 
 type GameThemeSkin = {
   shell: string;
@@ -421,7 +446,7 @@ function extractGameBananaFiles(payload: unknown): {
 }
 
 function App() {
-  type PrimaryTab = "manager" | "browse" | "downloads" | "modding-sites" | "discord" | "nextcloud-side" | "fixes" | "settings";
+  type PrimaryTab = "manager" | "browse" | "downloads" | "modding-sites" | "discord" | "nextcloud-side" | "model-preview" | "fixes" | "settings";
   type ModdingSiteTab = "gbweb" | "arca" | "nextcloud";
 
   const [state, setState] = useState<BootstrapState | null>(null);
@@ -500,6 +525,7 @@ function App() {
   const [devBackgroundPath, setDevBackgroundPath] = useState<string | null>(null);
   const [devBackgroundDataUrl, setDevBackgroundDataUrl] = useState<string | null>(null);
   const [devIconStatus, setDevIconStatus] = useState<string | null>(null);
+  const [modelPreviewPath, setModelPreviewPath] = useState("");
 
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [dragDropMsg, setDragDropMsg] = useState<string | null>(null);
@@ -536,6 +562,98 @@ function App() {
   const devUseAllBackgrounds = Boolean(
     draftSettings?.dev_use_all_backgrounds ?? persistedSettings?.dev_use_all_backgrounds ?? false,
   );
+  const showModelPreviewTab = Boolean(
+    draftSettings?.dev_enable_model_preview_tab ?? persistedSettings?.dev_enable_model_preview_tab ?? false,
+  ) && devModeEnabled;
+  const language = normalizeLanguage(draftSettings?.language ?? persistedSettings?.language);
+  const modSortOrder = draftSettings?.mod_sort_order ?? persistedSettings?.mod_sort_order ?? "name";
+  const L = language === "de"
+    ? {
+        modBrowser: "Mod-Browser",
+        downloads: "Downloads",
+        moddingSides: "Modding-Seiten",
+        discord: "Discord",
+        cloudSide: "Cloud Side",
+        modelPreview: "Modellvorschau",
+        fixManager: "Fix-Manager",
+        settings: "Einstellungen",
+        refreshState: "Status aktualisieren",
+        saveSettings: "Einstellungen speichern",
+        createMissingFolders: "Fehlende Ordner erstellen",
+        installRepairSetup: "Setup installieren/reparieren",
+        createShortcut: "Verknüpfung erstellen",
+        timeAdded: "Hinzugefügt",
+        sort: "Sortierung",
+        sortName: "Name",
+        sortTimeAdded: "Hinzugefügt (neueste zuerst)",
+        settingsEditor: "Einstellungseditor",
+        appVersion: "App-Version",
+        resourcesVersion: "Ressourcen-Version",
+        theme: "Theme",
+        lastSelectedGame: "Zuletzt gewähltes Spiel",
+        language: "Sprache",
+        updateInteraction: "Updates und Interaktion",
+        devMode: "Dev-Modus (zeigt unten Entwickleroptionen)",
+        devModeWarning: "Warnung: Der Entwicklermodus nutzt experimentelle Funktionen und sollte für die normale Nutzung deaktiviert bleiben.",
+        autoCheckUpdates: "Updates beim Start automatisch pruefen (mit Bestaetigung)",
+        rightClickToggle: "Rechtsklick schaltet Mods um",
+        rememberSessions: "Web-Sitzungen/Login-Cookies merken (schnelleres Einloggen)",
+        loginHints: "Login-Hinweise in Web-Tabs aktivieren",
+        adblock: "Integrierte Basis-Werbe- und Tracker-Blockierung für Web-Tabs aktivieren",
+        removeStockFixes: "Nach einem Ressourcen-Update heruntergeladene Stock-Fixes löschen (nur benutzerdefinierte Fixes)",
+        showModdingTabs: "Modding-Seiten-Tab anzeigen",
+        showDiscord: "Discord-Tab anzeigen",
+        showCloudTabs: "Cloud-Tabs anzeigen (Public Share + Cloud-Seite)",
+        quickLoginSave: "Schnellspeicher für Logins (Arca + GameBanana)",
+        quickLoginDesc: "Speichert Zugangsdaten lokal in den Einstellungen für schnelles Autofill in den integrierten Browser-Tabs.",
+        devModeSection: "Entwicklermodus",
+        modelPreviewToggle: "Modellvorschau-Tab aktivieren (experimenteller GLB-Viewer)",
+        useImageBg: "Bildhintergrund verwenden (Bild vs. normal umschalten)",
+        useAllBg: "app/all-Hintergründe für alle Spiele nutzen (aus = pro Spiel ein Ordner)",
+      }
+    : {
+        modBrowser: "Mod-Browser",
+        downloads: "Downloads",
+        moddingSides: "Modding Sides",
+        discord: "Discord",
+        cloudSide: "Cloud Side",
+        modelPreview: "Model Preview",
+        fixManager: "Fix Manager",
+        settings: "Settings",
+        refreshState: "Refresh state",
+        saveSettings: "Save Settings",
+        createMissingFolders: "Create Missing Folders",
+        installRepairSetup: "Install/Repair Setup",
+        createShortcut: "Create Shortcut",
+        timeAdded: "Time added",
+        sort: "Sort",
+        sortName: "Name",
+        sortTimeAdded: "Time Added (newest first)",
+        settingsEditor: "Settings Editor",
+        appVersion: "App Version",
+        resourcesVersion: "Resources Version",
+        theme: "Theme",
+        lastSelectedGame: "Last Selected Game",
+        language: "Language",
+        updateInteraction: "Update & Interaction",
+        devMode: "Dev Mode (shows dev customization options below)",
+        devModeWarning: "Warning: Developer Mode uses experimental features and should stay disabled for normal use.",
+        autoCheckUpdates: "Auto-check updates on startup (with confirmation)",
+        rightClickToggle: "Right-click toggles mods",
+        rememberSessions: "Remember web sessions/login cookies (faster sign-in)",
+        loginHints: "Enable login helper hints in web tabs",
+        adblock: "Enable built-in basic ad/tracker blocking for web tabs",
+        removeStockFixes: "After resources update, delete downloaded stock fixes (custom fixes only)",
+        showModdingTabs: "Show Modding Sides tab",
+        showDiscord: "Show Discord tab",
+        showCloudTabs: "Show Cloud tabs (public share + side)",
+        quickLoginSave: "Quick Login Save (Arca + GameBanana)",
+        quickLoginDesc: "Stores credentials locally in settings for quick autofill in the in-app browser tabs.",
+        devModeSection: "Developer Mode",
+        modelPreviewToggle: "Enable Model Preview tab (experimental GLB viewer)",
+        useImageBg: "Use image background (toggle image vs normal)",
+        useAllBg: "Use app/all backgrounds for all games (off = per-game folders)",
+      };
   const highlightedGame = activeGame ?? persistedSettings?.last_selected_game ?? "gi";
   const highlightedGameConfig = GAMES[highlightedGame];
   const activeGameTheme = GAME_THEME_SKINS[highlightedGame];
@@ -562,6 +680,12 @@ function App() {
     ? [...itemMods.mods].sort((left, right) => {
         if (left.disabled !== right.disabled) {
           return Number(left.disabled) - Number(right.disabled);
+        }
+        if (modSortOrder === "time_added") {
+          const timeDelta = (right.time_added_epoch ?? 0) - (left.time_added_epoch ?? 0);
+          if (timeDelta !== 0) {
+            return timeDelta;
+          }
         }
         return left.display_name.localeCompare(right.display_name, undefined, { sensitivity: "base" });
       })
@@ -678,7 +802,11 @@ function App() {
       setActiveTab("manager");
       return;
     }
-  }, [activeTab, showDiscordTab, showModdingSidesTab, showNextcloudTabs]);
+    if (activeTab === "model-preview" && !showModelPreviewTab) {
+      setActiveTab("manager");
+      return;
+    }
+  }, [activeTab, showDiscordTab, showModdingSidesTab, showNextcloudTabs, showModelPreviewTab]);
 
   useEffect(() => {
     if (!showNextcloudTabs && activeModdingSiteTab === "nextcloud") {
@@ -1815,6 +1943,22 @@ function App() {
     }
   }
 
+  async function handleCreateDesktopShortcut() {
+    setSavingSettings(true);
+    setSaveMessage(null);
+
+    try {
+      const shortcutPath = await invoke<string>("create_shortcut_from_settings", {
+        baseDir: state?.legacy_install?.base_dir ?? null,
+      });
+      setSaveMessage(`Desktop shortcut created at ${shortcutPath}.`);
+    } catch (err) {
+      setSaveMessage(`Create shortcut failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
   async function handleCreateAllMissingFolders() {
     setSavingSettings(true);
     setSaveMessage(null);
@@ -2344,7 +2488,7 @@ function App() {
               style={activeTab === "browse" ? navActiveStyle : navIdleStyle}
             >
               <Globe className="h-4 w-4" />
-              Mod-Browser
+              {L.modBrowser}
             </button>
             <button
               type="button"
@@ -2360,7 +2504,7 @@ function App() {
               style={activeTab === "downloads" ? navActiveStyle : navIdleStyle}
             >
               <HardDriveDownload className="h-4 w-4" />
-              Downloads
+              {L.downloads}
             </button>
             {showModdingSidesTab ? (
               <button
@@ -2377,7 +2521,7 @@ function App() {
                 style={activeTab === "modding-sites" ? navActiveStyle : navIdleStyle}
               >
                 <Globe className="h-4 w-4" />
-                Modding Sides
+                {L.moddingSides}
               </button>
             ) : null}
             {showDiscordTab ? (
@@ -2395,7 +2539,7 @@ function App() {
                 style={activeTab === "discord" ? navActiveStyle : navIdleStyle}
               >
                 <MessageCircle className="h-4 w-4" />
-                Discord
+                {L.discord}
               </button>
             ) : null}
             {showNextcloudTabs ? (
@@ -2413,7 +2557,25 @@ function App() {
                 style={activeTab === "nextcloud-side" ? navActiveStyle : navIdleStyle}
               >
                 <Link2 className="h-4 w-4" />
-                Nexcloud Side
+                {L.cloudSide}
+              </button>
+            ) : null}
+            {showModelPreviewTab ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("model-preview");
+                }}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  activeTab === "model-preview"
+                    ? navActiveClassName
+                    : navIdleClassName,
+                )}
+                style={activeTab === "model-preview" ? navActiveStyle : navIdleStyle}
+              >
+                <Layers3 className="h-4 w-4" />
+                {L.modelPreview}
               </button>
             ) : null}
             <button
@@ -2430,7 +2592,7 @@ function App() {
               style={activeTab === "fixes" ? navActiveStyle : navIdleStyle}
             >
               <Gamepad2 className="h-4 w-4" />
-              Fix Manager
+              {L.fixManager}
             </button>
             <button
               type="button"
@@ -2446,7 +2608,7 @@ function App() {
               style={activeTab === "settings" ? navActiveStyle : navIdleStyle}
             >
               <Settings2 className="h-4 w-4" />
-              Settings
+              {L.settings}
             </button>
             <button
               type="button"
@@ -2475,7 +2637,7 @@ function App() {
                   (loading || scanLoading || itemLoading || savingSettings) && "animate-spin",
                 )}
               />
-              Refresh state
+              {L.refreshState}
             </button>
             <button
               type="button"
@@ -2739,7 +2901,7 @@ function App() {
           />
         ) : activeTab === "modding-sites" && showModdingSidesTab ? (
           <section className="mt-4 space-y-4">
-            <div className={clsx("rounded-[24px] p-4", panelClassName)}>
+            <div className={clsx("sticky top-24 z-20 rounded-[24px] p-4 backdrop-blur-md", panelClassName)}>
               <div className={clsx("grid gap-3", showNextcloudTabs ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
                 <button
                   type="button"
@@ -2782,7 +2944,7 @@ function App() {
                         : "border-white/10 bg-white/4 text-slate-200 hover:bg-white/8",
                     )}
                   >
-                    Nextcloud Public Share
+                      Cloud Public Share
                   </button>
                 ) : null}
               </div>
@@ -2854,7 +3016,17 @@ function App() {
             }}
           />
         ) : activeTab === "discord" && showDiscordTab ? (
-          <DiscordTab rememberWebSessions={rememberWebSessions} />
+          <DiscordTab
+            rememberWebSessions={rememberWebSessions}
+            gameModRoot={currentModRoot}
+            onDownloadEvent={handleDownloadEvent}
+          />
+        ) : activeTab === "model-preview" && showModelPreviewTab ? (
+          <ModelPreviewTab
+            modelPath={modelPreviewPath}
+            onModelPathChange={setModelPreviewPath}
+            toAssetSrc={toAssetSrc}
+          />
         ) : (
           <>
 
@@ -3183,6 +3355,20 @@ function App() {
                   placeholder="Search mods..."
                   className={clsx("mt-3 max-w-[420px]", managerControlInputClassName)}
                 />
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <label className="text-xs uppercase tracking-[0.16em] text-slate-400">{L.sort}</label>
+                  <select
+                    value={modSortOrder}
+                    onChange={(event) => {
+                      const nextMode = event.currentTarget.value as "name" | "time_added";
+                      updateDraftSettings((current) => ({ ...current, mod_sort_order: nextMode }));
+                    }}
+                    className="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-xs text-white"
+                  >
+                    <option value="name">{L.sortName}</option>
+                    <option value="time_added">{L.sortTimeAdded}</option>
+                  </select>
+                </div>
               </div>
               <div className="grid min-w-[220px] grid-cols-3 gap-3">
                 <div className="rounded-2xl border border-white/8 bg-white/4 p-3 text-center">
@@ -3390,6 +3576,9 @@ function App() {
                             </>
                           )}
                           <p className="mt-2 break-all font-mono text-xs text-slate-400">{mod.path}</p>
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            {L.timeAdded}: {formatEpochLabel(mod.time_added_epoch ?? null, language)}
+                          </p>
                         </div>
                         <span
                           className={clsx(
@@ -3591,7 +3780,7 @@ function App() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className={clsx("flex items-center gap-2 text-xs uppercase tracking-[0.28em]", textMutedClassName)}>
                 <Settings2 className="h-4 w-4" />
-                Settings Editor
+                {L.settingsEditor}
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button
@@ -3603,7 +3792,7 @@ function App() {
                   className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
                 >
                   <Save className="h-4 w-4" />
-                  {savingSettings ? "Saving..." : "Save Settings"}
+                  {savingSettings ? "Saving..." : L.saveSettings}
                 </button>
                 <button
                   type="button"
@@ -3614,7 +3803,7 @@ function App() {
                   className="inline-flex items-center gap-2 rounded-full border border-emerald-300/30 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/30 disabled:cursor-wait disabled:opacity-70"
                 >
                   <FolderTree className="h-4 w-4" />
-                  {savingSettings ? "Creating missing folders..." : "Create Missing Folders"}
+                  {savingSettings ? "Creating missing folders..." : L.createMissingFolders}
                 </button>
                 <button
                   type="button"
@@ -3625,7 +3814,18 @@ function App() {
                   className="inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-wait disabled:opacity-70"
                 >
                   <Download className="h-4 w-4" />
-                  {savingSettings ? "Running install setup..." : "Install/Repair Setup"}
+                  {savingSettings ? "Running install setup..." : L.installRepairSetup}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleCreateDesktopShortcut();
+                  }}
+                  disabled={savingSettings}
+                  className="inline-flex items-center gap-2 rounded-full border border-sky-300/30 bg-sky-500/20 px-4 py-2 text-sm font-medium text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <Link2 className="h-4 w-4" />
+                  {savingSettings ? "Creating shortcut..." : L.createShortcut}
                 </button>
               </div>
             </div>
@@ -3634,17 +3834,17 @@ function App() {
 
             <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">App Version</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.appVersion}</span>
                 <p className="mt-3 text-sm text-white">{state?.app_version ?? "—"}</p>
               </div>
 
               <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Resources Version</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.resourcesVersion}</span>
                 <p className="mt-3 text-sm text-white">{draftSettings?.version ?? "—"}</p>
               </div>
 
               <label className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Theme</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.theme}</span>
                 <select
                   value={draftSettings?.theme ?? "dark"}
                   onChange={(event) => {
@@ -3660,7 +3860,7 @@ function App() {
               </label>
 
               <label className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Last Selected Game</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.lastSelectedGame}</span>
                 <select
                   value={draftSettings?.last_selected_game ?? highlightedGame}
                   onChange={(event) => {
@@ -3678,8 +3878,23 @@ function App() {
                 </select>
               </label>
 
+              <label className="rounded-2xl border border-white/8 bg-white/4 p-4">
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.language}</span>
+                <select
+                  value={draftSettings?.language ?? "en"}
+                  onChange={(event) => {
+                    const nextLanguage = event.currentTarget.value as "en" | "de";
+                    updateDraftSettings((current) => ({ ...current, language: nextLanguage }));
+                  }}
+                  className="mt-3 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                >
+                  <option value="en">English</option>
+                  <option value="de">Deutsch</option>
+                </select>
+              </label>
+
               <label className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Update & Interaction</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.updateInteraction}</span>
                 <div className="mt-3 space-y-2 text-sm text-slate-200">
                   <label className="flex items-center gap-2">
                     <input
@@ -3690,10 +3905,10 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, dev_mode: nextValue }));
                       }}
                     />
-                    Dev Mode (shows dev customization options below)
+                    {L.devMode}
                   </label>
                   <p className="rounded-xl border border-amber-300/35 bg-amber-500/12 px-3 py-2 text-xs text-amber-100">
-                    Warning: Dev Mode uses experimental features and should stay disabled for normal use.
+                    {L.devModeWarning}
                   </p>
                   <label className="flex items-center gap-2">
                     <input
@@ -3704,7 +3919,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, auto_check_updates: nextValue }));
                       }}
                     />
-                    Auto-check updates on startup (with confirmation)
+                    {L.autoCheckUpdates}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3715,7 +3930,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, right_click_toggle_mods: nextValue }));
                       }}
                     />
-                    Right-click toggles mods
+                    {L.rightClickToggle}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3726,7 +3941,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, remember_web_sessions: nextValue }));
                       }}
                     />
-                    Remember web sessions/login cookies (faster sign-in)
+                    {L.rememberSessions}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3737,7 +3952,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, enable_login_helper_hints: nextValue }));
                       }}
                     />
-                    Enable login helper hints in web tabs
+                    {L.loginHints}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3748,7 +3963,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, enable_web_adblocker: nextValue }));
                       }}
                     />
-                    Enable built-in basic ad/tracker blocking for web tabs
+                    {L.adblock}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3759,7 +3974,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, remove_downloaded_stock_fixes_after_update: nextValue }));
                       }}
                     />
-                    After resources update, delete downloaded stock fixes (custom fixes only)
+                    {L.removeStockFixes}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3770,7 +3985,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, show_modding_sides_tab: nextValue }));
                       }}
                     />
-                    Show Modding Sides tab
+                    {L.showModdingTabs}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3781,7 +3996,7 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, show_discord_tab: nextValue }));
                       }}
                     />
-                    Show Discord tab
+                    {L.showDiscord}
                   </label>
                   <label className="flex items-center gap-2">
                     <input
@@ -3792,15 +4007,15 @@ function App() {
                         updateDraftSettings((current) => ({ ...current, show_nextcloud_tabs: nextValue }));
                       }}
                     />
-                    Show Nextcloud tabs (public share + side)
+                    {L.showCloudTabs}
                   </label>
                 </div>
               </label>
 
               <section className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Quick Login Save (Arca + GameBanana)</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.quickLoginSave}</span>
                 <p className="mt-2 text-xs text-slate-400">
-                  Stores credentials locally in settings for quick autofill in in-app browser tabs.
+                  {L.quickLoginDesc}
                 </p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="rounded-xl border border-white/8 bg-slate-950/45 p-3">
@@ -3857,13 +4072,24 @@ function App() {
               </section>
 
               <section className="rounded-2xl border border-white/8 bg-white/4 p-4 sm:col-span-2 xl:col-span-3">
-                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Developer Mode</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{L.devModeSection}</span>
                 <div className="mt-3 space-y-2 text-sm text-slate-200">
                   <p className="rounded-xl border border-amber-300/35 bg-amber-500/12 px-3 py-2 text-xs text-amber-100">
-                    Experimental only: keep Dev Mode disabled unless you are testing custom icon/background behavior.
+                    {L.devModeWarning}
                   </p>
                   {Boolean(draftSettings?.dev_mode ?? false) ? (
                     <>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draftSettings?.dev_enable_model_preview_tab ?? false)}
+                          onChange={(event) => {
+                            const nextValue = event.currentTarget.checked;
+                            updateDraftSettings((current) => ({ ...current, dev_enable_model_preview_tab: nextValue }));
+                          }}
+                        />
+                        {L.modelPreviewToggle}
+                      </label>
                       <label className="flex items-center gap-2">
                         <input
                           type="checkbox"
@@ -3873,7 +4099,7 @@ function App() {
                             updateDraftSettings((current) => ({ ...current, dev_use_image_background: nextValue }));
                           }}
                         />
-                        Use image background (toggle image vs normal)
+                        {L.useImageBg}
                       </label>
                       <label className="flex items-center gap-2">
                         <input
@@ -3884,7 +4110,7 @@ function App() {
                             updateDraftSettings((current) => ({ ...current, dev_use_all_backgrounds: nextValue }));
                           }}
                         />
-                        Use app/all backgrounds for all games (off = per-game folders)
+                        {L.useAllBg}
                       </label>
                       <p className="text-xs text-slate-400">
                         Folder layout: {`${state?.exe_dir ?? "<exe-dir>"}/app`} with icon/, all/, gi/, hsr/, wuwa/, zzz/, end/. Any supported image file name works.
@@ -3949,7 +4175,7 @@ function App() {
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {GAME_ORDER.map((gameId) => (
                 <label key={`nextcloud-${gameId}`} className="rounded-2xl border border-white/8 bg-white/4 p-4">
-                  <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Nextcloud Public Share Link</span>
+                  <span className="text-xs uppercase tracking-[0.2em] text-slate-400">{GAMES[gameId].name} Cloud Public Share Link</span>
                   <input
                     value={draftSettings?.nextcloud_links?.[gameId] ?? ""}
                     onChange={(event) => {
@@ -3970,7 +4196,7 @@ function App() {
             </div>
 
             <label className="mt-4 block rounded-2xl border border-white/8 bg-white/4 p-4">
-              <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Nextcloud Side Global Link</span>
+              <span className="text-xs uppercase tracking-[0.2em] text-slate-400">Cloud Side Global Link</span>
               <input
                 value={draftSettings?.nextcloud_side_link ?? ""}
                 onChange={(event) => {
@@ -4008,7 +4234,7 @@ function App() {
             </div>
 
             <p className="mt-3 text-sm text-slate-300/80">
-              Active and completed downloads for this app session from Mod-Browser, GameBanana, Arca, and Nextcloud. This list resets when the app is closed.
+              Active and completed downloads for this app session from Mod-Browser, GameBanana, Arca, Discord, and Cloud tabs. This list resets when the app is closed.
             </p>
 
             <div className="mt-4 space-y-3">
@@ -4023,7 +4249,7 @@ function App() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-white">{entry.modName}</p>
                         <p className="mt-1 text-xs text-slate-400">{entry.fileName}</p>
-                        <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">{entry.source}</p>
+                        <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-slate-500">{formatDownloadSourceLabel(entry.source)}</p>
                         <p className="mt-1 break-all font-mono text-[11px] text-slate-500">{entry.destinationPath}</p>
                       </div>
                       <span

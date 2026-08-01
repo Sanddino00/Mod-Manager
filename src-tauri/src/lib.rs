@@ -1,8 +1,12 @@
+use base64::Engine;
+use ddsfile::Dds;
+use image::ImageFormat;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -47,6 +51,7 @@ struct ModEntrySummary {
     display_name: String,
     path: String,
     disabled: bool,
+    time_added_epoch: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,6 +163,17 @@ struct DownloadInstallResult {
     installed_path: String,
     destination_path: String,
     preview_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewBuildResult {
+    model_path: Option<String>,
+    diffuse_texture_path: Option<String>,
+    texture_bindings: HashMap<String, String>,
+    metadata_path: String,
+    recipe_path: String,
+    toggle_count: usize,
+    message: String,
 }
 
 const CATEGORY_KEYS: [&str; 6] = [
@@ -290,6 +306,19 @@ fn create_desktop_shortcut(target_exe: &Path, working_dir: &Path) -> Result<(), 
     } else {
         Err("Failed to create desktop shortcut".to_string())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_shortcut_path() -> Result<PathBuf, String> {
+    let user_profile = std::env::var("USERPROFILE").map_err(|err| err.to_string())?;
+    Ok(PathBuf::from(user_profile)
+        .join("Desktop")
+        .join("Mod Manager v2.lnk"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn desktop_shortcut_path() -> Result<PathBuf, String> {
+    Ok(PathBuf::from("Mod Manager v2"))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -624,6 +653,18 @@ fn extract_ini_toggle_entries(ini_path: &Path) -> Vec<IniToggleEntry> {
 }
 
 fn scan_mod_entries(folder: &Path) -> Vec<ModEntrySummary> {
+    fn directory_added_epoch(path: &Path) -> Option<u64> {
+        let metadata = fs::metadata(path).ok()?;
+        let timestamp = metadata
+            .created()
+            .ok()
+            .or_else(|| metadata.modified().ok())?;
+        timestamp
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|value| value.as_secs())
+    }
+
     let mut mods = fs::read_dir(folder)
         .ok()
         .into_iter()
@@ -644,6 +685,7 @@ fn scan_mod_entries(folder: &Path) -> Vec<ModEntrySummary> {
                 display_name,
                 path: normalize_path(&path),
                 disabled,
+                time_added_epoch: directory_added_epoch(&path),
             })
         })
         .collect::<Vec<_>>();
@@ -1100,6 +1142,8 @@ fn default_settings(base_dir: &Path) -> Value {
         },
         "nextcloud_side_link": "",
         "theme": "dark",
+        "language": "en",
+        "mod_sort_order": "name",
         "script_targets": {},
         "version": detect_resource_version(&resources_dir),
         "auto_check_updates": false,
@@ -1117,6 +1161,7 @@ fn default_settings(base_dir: &Path) -> Value {
         "dev_mode": false,
         "dev_use_image_background": false,
         "dev_use_all_backgrounds": false,
+        "dev_enable_model_preview_tab": false,
         "last_release_tag": Value::Null,
         "last_app_release_tag": Value::Null,
         "last_resources_release_tag": Value::Null,
@@ -1131,6 +1176,84 @@ fn default_settings(base_dir: &Path) -> Value {
         "favorites": {},
         "right_click_toggle_mods": false,
     })
+}
+
+fn sanitize_script_relative_path(script_name: &str) -> Result<PathBuf, String> {
+    let trimmed = script_name.trim();
+    if trimmed.is_empty() {
+        return Err("Script name is empty".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if candidate.is_absolute() {
+        return Err("Script path must be relative".to_string());
+    }
+
+    for component in candidate.components() {
+        match component {
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                return Err("Invalid script path".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(candidate)
+}
+
+fn collect_fix_scripts_recursive(
+    root: &Path,
+    dir: &Path,
+    dedupe: &mut HashMap<String, FixScriptSummary>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_fix_scripts_recursive(root, &path, dedupe)?;
+            continue;
+        }
+
+        if !path.is_file() {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let kind = if ext == "py" {
+            Some("python")
+        } else if ext == "exe" {
+            Some("exe")
+        } else {
+            None
+        };
+
+        let Some(kind) = kind else {
+            continue;
+        };
+
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|err| err.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        dedupe.entry(rel.clone()).or_insert_with(|| FixScriptSummary {
+            name: rel,
+            kind: kind.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn merge_json(base: &mut Value, loaded: &Value) {
@@ -1630,39 +1753,13 @@ fn load_fixes_panel(game: String) -> Result<FixesPanelData, String> {
     ensure_custom_fixes_scaffold(&resources_dir)?;
 
     let mut dedupe: HashMap<String, FixScriptSummary> = HashMap::new();
-    let script_dirs = [
-        resources_dir.join(&game),
+    let script_roots = [
         resources_dir.join(CUSTOM_FIXES_DIR_NAME).join(&game),
+        resources_dir.join(&game),
     ];
 
-    for scripts_dir in script_dirs {
-        let entries = match fs::read_dir(&scripts_dir) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let name = entry.file_name().to_string_lossy().to_string();
-            let kind = if name.ends_with(".py") {
-                Some("python")
-            } else if name.ends_with(".exe") {
-                Some("exe")
-            } else {
-                None
-            };
-
-            if let Some(kind) = kind {
-                dedupe.entry(name.clone()).or_insert_with(|| FixScriptSummary {
-                    name,
-                    kind: kind.to_string(),
-                });
-            }
-        }
+    for script_root in script_roots {
+        collect_fix_scripts_recursive(&script_root, &script_root, &mut dedupe)?;
     }
 
     let mut scripts = dedupe.into_values().collect::<Vec<_>>();
@@ -1679,12 +1776,13 @@ fn load_fixes_panel(game: String) -> Result<FixesPanelData, String> {
 fn run_fix_script(game: String, script_name: String, target_path: String) -> Result<(), String> {
     let resources_dir = resolve_resources_dir()?;
     ensure_custom_fixes_scaffold(&resources_dir)?;
+    let script_relative = sanitize_script_relative_path(&script_name)?;
 
     let custom_script_path = resources_dir
         .join(CUSTOM_FIXES_DIR_NAME)
         .join(&game)
-        .join(&script_name);
-    let stock_script_path = resources_dir.join(&game).join(&script_name);
+        .join(&script_relative);
+    let stock_script_path = resources_dir.join(&game).join(&script_relative);
     let script_path = if custom_script_path.is_file() {
         custom_script_path
     } else {
@@ -1758,12 +1856,13 @@ fn run_fix_script(game: String, script_name: String, target_path: String) -> Res
 fn launch_fix_script_source(game: String, script_name: String) -> Result<(), String> {
     let resources_dir = resolve_resources_dir()?;
     ensure_custom_fixes_scaffold(&resources_dir)?;
+    let script_relative = sanitize_script_relative_path(&script_name)?;
 
     let custom_script_path = resources_dir
         .join(CUSTOM_FIXES_DIR_NAME)
         .join(&game)
-        .join(&script_name);
-    let stock_script_path = resources_dir.join(&game).join(&script_name);
+        .join(&script_relative);
+    let stock_script_path = resources_dir.join(&game).join(&script_relative);
     let script_path = if custom_script_path.is_file() {
         custom_script_path
     } else {
@@ -1833,6 +1932,142 @@ fn load_mod_details(path: String) -> Result<ModDetailSummary, String> {
         mod_path: normalize_path(&mod_path),
         ini_path: ini_path.as_ref().map(|value| normalize_path(value)),
         toggles,
+    })
+}
+
+#[tauri::command]
+fn build_preview_glb_from_dump(
+    dump_path: String,
+    mod_path: String,
+    output_dir: Option<String>,
+) -> Result<PreviewBuildResult, String> {
+    let dump_root = PathBuf::from(dump_path.trim());
+    if !dump_root.is_dir() {
+        return Err("Dump path not found".to_string());
+    }
+
+    let mod_root = PathBuf::from(mod_path.trim());
+    if !mod_root.is_dir() {
+        return Err("Mod folder not found".to_string());
+    }
+
+    let output_root = output_dir
+        .as_ref()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| mod_root.join("preview_build"));
+    fs::create_dir_all(&output_root).map_err(|err| err.to_string())?;
+
+    let ini_path = find_first_ini_file(&mod_root);
+    let diffuse_texture_path = find_preferred_mod_diffuse_texture(&mod_root).map(|value| normalize_path(&value));
+    let ini_first_index_texture_map = ini_path
+        .as_ref()
+        .map(|value| parse_ini_first_index_texture_map(value, &mod_root))
+        .unwrap_or_default();
+    let ini_ib_texture_map = ini_path
+        .as_ref()
+        .map(|value| parse_ini_ib_texture_by_resource(value, &mod_root))
+        .unwrap_or_default();
+    let mut texture_bindings: HashMap<String, String> = HashMap::new();
+    let toggles = ini_path
+        .as_ref()
+        .map(|value| extract_ini_toggle_entries(value))
+        .unwrap_or_default();
+
+    let metadata_path = output_root.join("preview_toggles.json");
+    let metadata_json = json!({
+        "mod_path": normalize_path(&mod_root),
+        "dump_path": normalize_path(&dump_root),
+        "ini_path": ini_path.as_ref().map(|value| normalize_path(value)),
+        "diffuse_texture_path": diffuse_texture_path.clone(),
+        "texture_bindings": texture_bindings.clone(),
+        "toggle_count": toggles.len(),
+        "toggles": toggles,
+    });
+    fs::write(
+        &metadata_path,
+        serde_json::to_string_pretty(&metadata_json).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+
+    let recipe_path = output_root.join("build_recipe.txt");
+    let recipe_body = [
+        "3DMigoto Preview Build Recipe",
+        "",
+        "1) Use the dump folder from 3DMigoto/XXMI together with the installed mod folder.",
+        "2) Use preview_toggles.json to map Key sections to your preview tool toggles.",
+        "3) The app first tries to build preview_model.glb from mod VB/IB binary buffers in the ini resources.",
+        "4) If that fails, it falls back to dump VB/IB text mesh data.",
+        "",
+        "If no valid mesh is found, it falls back to a proxy model so preview still works.",
+    ]
+    .join("\r\n");
+    fs::write(&recipe_path, recipe_body).map_err(|err| err.to_string())?;
+
+    let model_output = output_root.join("preview_model.glb");
+    let mesh_source = build_mod_binary_preview_mesh(&mod_root, ini_path.as_deref())?
+        .map(|mesh| (mesh, "mod binary buffers".to_string()))
+        .or_else(|| {
+            build_dump_preview_mesh(&dump_root)
+                .ok()
+                .flatten()
+                .map(|mesh| (mesh, "dump text mesh data".to_string()))
+        });
+
+    let message = if let Some((mesh, source_label)) = mesh_source {
+        texture_bindings = build_preview_texture_bindings(
+            &mesh.parts,
+            &mod_root,
+            &ini_first_index_texture_map,
+            &ini_ib_texture_map,
+        );
+        if texture_bindings.is_empty() {
+            if let Some(diffuse) = &diffuse_texture_path {
+                for part in &mesh.parts {
+                    let key = sanitize_material_name(&part.name);
+                    if !key.is_empty() {
+                        texture_bindings.insert(key, diffuse.clone());
+                    }
+                }
+            }
+        }
+
+        let metadata_json = json!({
+            "mod_path": normalize_path(&mod_root),
+            "dump_path": normalize_path(&dump_root),
+            "ini_path": ini_path.as_ref().map(|value| normalize_path(value)),
+            "diffuse_texture_path": diffuse_texture_path.clone(),
+            "texture_bindings": texture_bindings.clone(),
+            "toggle_count": toggles.len(),
+            "toggles": toggles,
+        });
+        fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata_json).map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+
+        create_preview_glb_from_mesh(&model_output, &mesh, &metadata_json)?;
+        format!(
+            "Preview model generated from {} ({} vertices, {} triangles).",
+            source_label,
+            mesh.positions.len(),
+            mesh.indices.len() / 3
+        )
+    } else {
+        let parts = discover_preview_parts(&dump_root, &mod_root);
+        create_cube_mesh_glb(&model_output, &parts, &metadata_json)?;
+        "Preview model generated (proxy fallback).".to_string()
+    };
+
+    Ok(PreviewBuildResult {
+        model_path: Some(normalize_path(&model_output)),
+        diffuse_texture_path,
+        texture_bindings,
+        metadata_path: normalize_path(&metadata_path),
+        recipe_path: normalize_path(&recipe_path),
+        toggle_count: toggles.len(),
+        message,
     })
 }
 
@@ -1957,6 +2192,72 @@ fn load_image_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn load_file_data_url(path: String) -> Result<String, String> {
+    let file_path = PathBuf::from(path.trim());
+    if !file_path.is_file() {
+        return Err("File not found".to_string());
+    }
+
+    let ext = file_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mime = match ext.as_str() {
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "dds" => "image/vnd-ms.dds",
+        "ini" | "json" | "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+
+    let bytes = fs::read(&file_path).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+fn load_texture_data_url(path: String) -> Result<String, String> {
+    let file_path = PathBuf::from(path.trim());
+    if !file_path.is_file() {
+        return Err("Texture file not found".to_string());
+    }
+
+    let ext = file_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if ext == "dds" {
+        let bytes = fs::read(&file_path).map_err(|err| err.to_string())?;
+        let mut cursor = Cursor::new(&bytes);
+        let dds = Dds::read(&mut cursor).map_err(|err| format!("Failed to parse DDS: {err}"))?;
+        let image = image_dds::image_from_dds(&dds, 0).map_err(|err| format!("Failed to decode DDS: {err}"))?;
+
+        let mut encoded_png = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut encoded_png), ImageFormat::Png)
+            .map_err(|err| format!("Failed to convert DDS to PNG: {err}"))?;
+
+        return Ok(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded_png)
+        ));
+    }
+
+    load_file_data_url(path)
+}
+
+#[tauri::command]
 fn load_images_data_urls(paths: Vec<String>) -> HashMap<String, String> {
     let mut result = HashMap::new();
 
@@ -1981,6 +2282,1809 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn score_diffuse_candidate(name: &str) -> i32 {
+    let lower = name.to_ascii_lowercase();
+    let mut score = 0;
+    if lower.contains("diffuse") {
+        score += 100;
+    }
+    if lower.contains("main") {
+        score += 20;
+    }
+    if lower.contains("body") {
+        score += 18;
+    }
+    if lower.contains("head") {
+        score += 14;
+    }
+    if lower.contains("dress") {
+        score += 12;
+    }
+    if lower.contains("face") {
+        score += 10;
+    }
+    if lower.contains("hair") {
+        score += 8;
+    }
+    if lower.contains("normal") || lower.contains("lightmap") || lower.contains("mask") {
+        score -= 80;
+    }
+    score
+}
+
+fn find_preferred_mod_diffuse_texture(mod_root: &Path) -> Option<PathBuf> {
+    let mut stack = vec![mod_root.to_path_buf()];
+    let mut best: Option<(i32, PathBuf)> = None;
+
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if ext != "dds" {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            let score = score_diffuse_candidate(file_name);
+            if score <= 0 {
+                continue;
+            }
+
+            match &best {
+                Some((current_score, _)) if score <= *current_score => {}
+                _ => {
+                    best = Some((score, path.clone()));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, path)| path)
+}
+
+fn sanitize_material_name(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+
+    out.trim_matches('_').to_string()
+}
+
+fn extract_alnum_tokens(value: &str, min_len: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else if current.len() >= min_len {
+            out.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+
+    if current.len() >= min_len {
+        out.push(current);
+    }
+
+    out
+}
+
+fn looks_like_hex_token(value: &str) -> bool {
+    let len = value.len();
+    (6..=16).contains(&len) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn collect_mod_texture_candidates(mod_root: &Path) -> Vec<PathBuf> {
+    let mut stack = vec![mod_root.to_path_buf()];
+    let mut files = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if ["dds", "png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) {
+                files.push(path);
+            }
+        }
+    }
+
+    files
+}
+
+fn is_image_texture_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".dds")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
+}
+
+fn select_override_texture_resource(
+    slot_resources: &HashMap<String, String>,
+    resource_files: &HashMap<String, String>,
+    mod_root: &Path,
+) -> Option<String> {
+    let mut candidates: Vec<(String, String)> = Vec::new();
+
+    for slot in ["ps-t1", "ps-t0", "ps-t2", "ps-t3"] {
+        let Some(resource_name) = slot_resources.get(slot) else {
+            continue;
+        };
+        let key = resource_name.to_ascii_lowercase();
+        let Some(file_name) = resource_files.get(&key) else {
+            continue;
+        };
+        let path = mod_root.join(file_name);
+        if !path.exists() {
+            continue;
+        }
+        candidates.push((resource_name.clone(), file_name.clone()));
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let diffuse_candidate = candidates.iter().find(|(_, file_name)| {
+        file_name.to_ascii_lowercase().contains("diffuse")
+    });
+    if let Some((resource_name, _)) = diffuse_candidate {
+        return Some(resource_name.clone());
+    }
+
+    candidates.first().map(|(resource_name, _)| resource_name.clone())
+}
+
+fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMap<u32, String> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut resource_files: HashMap<String, String> = HashMap::new();
+
+    let mut current_section = String::new();
+    let mut pending_resource_name: Option<String> = None;
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if current_section.to_ascii_lowercase().starts_with("resource") {
+                pending_resource_name = Some(current_section.clone());
+            } else {
+                pending_resource_name = None;
+            }
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("filename") {
+            continue;
+        }
+
+        let Some(resource_name) = &pending_resource_name else {
+            continue;
+        };
+        let file_name = value.trim().trim_matches('"').to_string();
+        if !is_image_texture_name(&file_name) {
+            continue;
+        }
+        resource_files.insert(resource_name.to_ascii_lowercase(), file_name);
+    }
+
+    let mut first_index_to_texture: HashMap<u32, String> = HashMap::new();
+    current_section.clear();
+    let mut current_first_index: Option<u32> = None;
+    let mut current_ps_slots: HashMap<String, String> = HashMap::new();
+
+    let flush_override = |first_index: Option<u32>, slot_resources: &HashMap<String, String>, out: &mut HashMap<u32, String>| {
+        let Some(index) = first_index else {
+            return;
+        };
+        let Some(resource_name) = select_override_texture_resource(slot_resources, &resource_files, mod_root) else {
+            return;
+        };
+
+        let key = resource_name.to_ascii_lowercase();
+        let Some(file_name) = resource_files.get(&key) else {
+            return;
+        };
+
+        let path = mod_root.join(file_name);
+        if path.exists() {
+            out.insert(index, normalize_path(&path));
+        }
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if current_section.to_ascii_lowercase().starts_with("textureoverride") {
+                flush_override(current_first_index, &current_ps_slots, &mut first_index_to_texture);
+            }
+
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            current_first_index = None;
+            current_ps_slots.clear();
+            continue;
+        }
+
+        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"');
+        if key == "match_first_index" {
+            current_first_index = value.parse::<u32>().ok();
+        } else if key.starts_with("ps-t") {
+            current_ps_slots.insert(key, value.to_string());
+        }
+    }
+
+    if current_section.to_ascii_lowercase().starts_with("textureoverride") {
+        flush_override(current_first_index, &current_ps_slots, &mut first_index_to_texture);
+    }
+
+    first_index_to_texture
+}
+
+#[derive(Debug, Clone, Default)]
+struct IniResourceBufferInfo {
+    filename: Option<String>,
+    stride: Option<usize>,
+    format: Option<String>,
+}
+
+fn parse_ini_resource_buffers(ini_path: &Path) -> HashMap<String, IniResourceBufferInfo> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut resources: HashMap<String, IniResourceBufferInfo> = HashMap::new();
+    let mut current_resource: Option<String> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if section.to_ascii_lowercase().starts_with("resource") {
+                current_resource = Some(section.to_ascii_lowercase());
+                resources.entry(section.to_ascii_lowercase()).or_default();
+            } else {
+                current_resource = None;
+            }
+            continue;
+        }
+
+        let Some(resource_name) = &current_resource else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        let entry = resources.entry(resource_name.clone()).or_default();
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"');
+        if key == "filename" {
+            entry.filename = Some(value.to_string());
+        } else if key == "stride" {
+            entry.stride = value.parse::<usize>().ok();
+        } else if key == "format" {
+            entry.format = Some(value.to_ascii_lowercase());
+        }
+    }
+
+    resources
+}
+
+fn parse_ini_ib_first_index_by_resource(ini_path: &Path) -> HashMap<String, u32> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut map = HashMap::new();
+    let mut current_section = String::new();
+    let mut current_first_index: Option<u32> = None;
+    let mut current_ib_resource: Option<String> = None;
+
+    let flush_override = |section: &str, first_index: Option<u32>, ib_resource: Option<String>, out: &mut HashMap<String, u32>| {
+        if !section.to_ascii_lowercase().starts_with("textureoverride") {
+            return;
+        }
+        let Some(index) = first_index else {
+            return;
+        };
+        let Some(resource) = ib_resource else {
+            return;
+        };
+        out.insert(resource.to_ascii_lowercase(), index);
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            flush_override(&current_section, current_first_index, current_ib_resource.take(), &mut map);
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            current_first_index = None;
+            current_ib_resource = None;
+            continue;
+        }
+
+        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"');
+        if key == "match_first_index" {
+            current_first_index = value.parse::<u32>().ok();
+        } else if key == "ib" {
+            current_ib_resource = Some(value.to_string());
+        }
+    }
+
+    flush_override(&current_section, current_first_index, current_ib_resource.take(), &mut map);
+    map
+}
+
+fn parse_ini_ib_texture_by_resource(ini_path: &Path, mod_root: &Path) -> HashMap<String, String> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut resource_files: HashMap<String, String> = HashMap::new();
+    let mut current_resource: Option<String> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if section.to_ascii_lowercase().starts_with("resource") {
+                current_resource = Some(section.to_ascii_lowercase());
+            } else {
+                current_resource = None;
+            }
+            continue;
+        }
+
+        let Some(resource_name) = &current_resource else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("filename") {
+            continue;
+        }
+
+        let file_name = value.trim().trim_matches('"').to_string();
+        if !is_image_texture_name(&file_name) {
+            continue;
+        }
+        resource_files.insert(resource_name.clone(), file_name);
+    }
+
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut current_section = String::new();
+    let mut current_ib: Option<String> = None;
+    let mut current_ps_slots: HashMap<String, String> = HashMap::new();
+
+    let flush_override = |section: &str,
+                          ib_resource: Option<String>,
+                          slot_resources: &HashMap<String, String>,
+                          out_map: &mut HashMap<String, String>| {
+        if !section.to_ascii_lowercase().starts_with("textureoverride") {
+            return;
+        }
+
+        let Some(ib_resource) = ib_resource else {
+            return;
+        };
+
+        let Some(resource_name) = select_override_texture_resource(slot_resources, &resource_files, mod_root) else {
+            return;
+        };
+
+        let key = resource_name.to_ascii_lowercase();
+        let Some(file_name) = resource_files.get(&key) else {
+            return;
+        };
+
+        let texture_path = mod_root.join(file_name);
+        if texture_path.is_file() {
+            out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+        }
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            flush_override(&current_section, current_ib.take(), &current_ps_slots, &mut out);
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            current_ib = None;
+            current_ps_slots.clear();
+            continue;
+        }
+
+        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"').to_string();
+        if key == "ib" {
+            current_ib = Some(value);
+        } else if key.starts_with("ps-t") {
+            current_ps_slots.insert(key, value);
+        }
+    }
+
+    flush_override(&current_section, current_ib.take(), &current_ps_slots, &mut out);
+    out
+}
+
+fn parse_ini_ib_vertex_resources(ini_path: &Path) -> HashMap<String, HashMap<String, String>> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut current_section = String::new();
+    let mut current_ib: Option<String> = None;
+    let mut current_vb_slots: HashMap<String, String> = HashMap::new();
+
+    let flush_override = |section: &str,
+                          ib_resource: Option<String>,
+                          vb_slots: &HashMap<String, String>,
+                          out_map: &mut HashMap<String, HashMap<String, String>>| {
+        if !section.to_ascii_lowercase().starts_with("textureoverride") {
+            return;
+        }
+        let Some(ib) = ib_resource else {
+            return;
+        };
+        if vb_slots.is_empty() {
+            return;
+        }
+        out_map.insert(ib.to_ascii_lowercase(), vb_slots.clone());
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            flush_override(&current_section, current_ib.take(), &current_vb_slots, &mut out);
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            current_ib = None;
+            current_vb_slots.clear();
+            continue;
+        }
+
+        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().trim_matches('"').to_string();
+        if key == "ib" {
+            current_ib = Some(value);
+        } else if key.starts_with("vb") {
+            current_vb_slots.insert(key, value);
+        }
+    }
+
+    flush_override(&current_section, current_ib.take(), &current_vb_slots, &mut out);
+    out
+}
+
+fn read_u32_indices(path: &Path, format: Option<&str>) -> Result<Vec<u32>, String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let wants_u16 = format
+        .map(|value| value.to_ascii_lowercase().contains("r16"))
+        .unwrap_or(false);
+    if wants_u16 {
+        let mut indices = Vec::with_capacity(bytes.len() / 2);
+        for chunk in bytes.chunks_exact(2) {
+            indices.push(u16::from_le_bytes([chunk[0], chunk[1]]) as u32);
+        }
+        return Ok(indices);
+    }
+
+    let wants_u32 = format
+        .map(|value| value.to_ascii_lowercase().contains("r32"))
+        .unwrap_or(false);
+    if wants_u32 || bytes.len() % 4 == 0 {
+        let mut indices = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            indices.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        return Ok(indices);
+    }
+
+    let mut indices = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        indices.push(u16::from_le_bytes([chunk[0], chunk[1]]) as u32);
+    }
+    Ok(indices)
+}
+
+fn read_position_normal_buffer(path: &Path, stride: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>), String> {
+    if stride < 12 {
+        return Err("Position buffer stride is too small".to_string());
+    }
+
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let count = bytes.len() / stride;
+    let mut positions = Vec::with_capacity(count);
+    let mut normals = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let base = i * stride;
+        let px = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid position buffer")?);
+        let py = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid position buffer")?);
+        let pz = f32::from_le_bytes(bytes[base + 8..base + 12].try_into().map_err(|_| "Invalid position buffer")?);
+        positions.push([px, py, pz]);
+
+        if stride >= 24 {
+            let nx = f32::from_le_bytes(bytes[base + 12..base + 16].try_into().map_err(|_| "Invalid normal buffer")?);
+            let ny = f32::from_le_bytes(bytes[base + 16..base + 20].try_into().map_err(|_| "Invalid normal buffer")?);
+            let nz = f32::from_le_bytes(bytes[base + 20..base + 24].try_into().map_err(|_| "Invalid normal buffer")?);
+            normals.push([nx, ny, nz]);
+        } else {
+            normals.push([0.0, 1.0, 0.0]);
+        }
+    }
+
+    Ok((positions, normals))
+}
+
+fn read_texcoord_buffer(path: &Path, stride: usize) -> Result<Vec<[f32; 2]>, String> {
+    if stride < 8 {
+        return Err("Texcoord buffer stride is too small".to_string());
+    }
+
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let count = bytes.len() / stride;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let max_offset = stride.saturating_sub(8);
+    let mut candidate_offsets = Vec::new();
+    let mut offset = 0usize;
+    while offset <= max_offset {
+        candidate_offsets.push(offset);
+        offset += 4;
+    }
+
+    let sample_count = count.min(64);
+    let mut chosen_offset = 0usize;
+    let mut chosen_score = i32::MIN;
+    for cand in candidate_offsets {
+        let mut score = 0i32;
+        let mut valid = true;
+
+        let mut prev_u: Option<f32> = None;
+        let mut prev_v: Option<f32> = None;
+        let mut varying_pairs = 0i32;
+        for i in 0..sample_count {
+            let base = i * stride + cand;
+            let u = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid texcoord buffer")?);
+            let v = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid texcoord buffer")?);
+
+            if !u.is_finite() || !v.is_finite() {
+                valid = false;
+                break;
+            }
+
+            if (-2.5..=2.5).contains(&u) && (-2.5..=2.5).contains(&v) {
+                score += 3;
+            }
+            if (0.0..=1.5).contains(&u) && (0.0..=1.5).contains(&v) {
+                score += 2;
+            }
+
+            if let (Some(pu), Some(pv)) = (prev_u, prev_v) {
+                if (u - pu).abs() > 1e-6 || (v - pv).abs() > 1e-6 {
+                    varying_pairs += 1;
+                }
+            }
+            prev_u = Some(u);
+            prev_v = Some(v);
+        }
+
+        if !valid {
+            continue;
+        }
+        score += varying_pairs;
+        if score > chosen_score {
+            chosen_score = score;
+            chosen_offset = cand;
+        }
+    }
+
+    let mut uvs = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = i * stride + chosen_offset;
+        let u = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid texcoord buffer")?);
+        let v = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid texcoord buffer")?);
+        uvs.push([u, v]);
+    }
+    Ok(uvs)
+}
+
+fn normalize_resource_name(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let trimmed = lower.strip_prefix("resource").unwrap_or(&lower);
+    trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+}
+
+fn strip_resource_suffix(value: &str, suffixes: &[&str]) -> String {
+    for suffix in suffixes {
+        if let Some(rest) = value.strip_suffix(suffix) {
+            return rest.to_string();
+        }
+    }
+    value.to_string()
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    let mut count = 0usize;
+    for (a, b) in left.chars().zip(right.chars()) {
+        if a != b {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn best_resource_match(
+    target: &str,
+    candidates: &[(String, IniResourceBufferInfo)],
+    suffixes: &[&str],
+) -> Option<(String, IniResourceBufferInfo)> {
+    let target_norm = strip_resource_suffix(&normalize_resource_name(target), suffixes);
+    let mut best: Option<(i32, String, IniResourceBufferInfo)> = None;
+
+    for (name, info) in candidates {
+        let candidate_norm = strip_resource_suffix(&normalize_resource_name(name), suffixes);
+        let mut score = common_prefix_len(&target_norm, &candidate_norm) as i32;
+        if target_norm == candidate_norm {
+            score += 10_000;
+        } else if target_norm.contains(&candidate_norm) || candidate_norm.contains(&target_norm) {
+            score += 500;
+        }
+
+        match &best {
+            Some((best_score, best_name, _)) if score < *best_score || (score == *best_score && name > best_name) => {}
+            _ => {
+                best = Some((score, name.clone(), info.clone()));
+            }
+        }
+    }
+
+    best.map(|(_, name, info)| (name, info))
+}
+
+fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Result<Option<PreviewMeshData>, String> {
+    let Some(ini_path) = ini_path else {
+        return Ok(None);
+    };
+
+    let resources = parse_ini_resource_buffers(ini_path);
+    if resources.is_empty() {
+        return Ok(None);
+    }
+
+    let mut position_resources: Vec<(String, IniResourceBufferInfo)> = Vec::new();
+    let mut texcoord_resources: Vec<(String, IniResourceBufferInfo)> = Vec::new();
+    let mut ib_resources: Vec<(String, IniResourceBufferInfo)> = Vec::new();
+
+    for (name, info) in &resources {
+        let Some(filename) = &info.filename else {
+            continue;
+        };
+        let lower_file = filename.to_ascii_lowercase();
+        let lower_name = name.to_ascii_lowercase();
+
+        if lower_file.ends_with(".ib") {
+            ib_resources.push((name.clone(), info.clone()));
+            continue;
+        }
+        if lower_file.ends_with(".buf") && (lower_name.contains("position") || lower_file.contains("position")) {
+            position_resources.push((name.clone(), info.clone()));
+            continue;
+        }
+        if lower_file.ends_with(".buf") && (lower_name.contains("texcoord") || lower_file.contains("texcoord")) {
+            texcoord_resources.push((name.clone(), info.clone()));
+        }
+    }
+
+    if position_resources.is_empty() || ib_resources.is_empty() {
+        return Ok(None);
+    }
+
+    position_resources.sort_by(|a, b| a.0.cmp(&b.0));
+    texcoord_resources.sort_by(|a, b| a.0.cmp(&b.0));
+    ib_resources.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut loaded_position_groups: HashMap<String, (u32, usize)> = HashMap::new();
+
+    let first_index_by_ib_resource = parse_ini_ib_first_index_by_resource(ini_path);
+    let ib_vertex_resources = parse_ini_ib_vertex_resources(ini_path);
+    let mut indices = Vec::new();
+    let mut parts = Vec::new();
+
+    for (resource_name, info) in ib_resources {
+        let ib_key = resource_name.to_ascii_lowercase();
+        let vb_overrides = ib_vertex_resources.get(&ib_key);
+
+        let override_position = vb_overrides.and_then(|slots| {
+            ["vb0", "vb1", "vb2", "vb3"].iter().find_map(|slot| {
+                let target = slots.get(*slot)?;
+                position_resources
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(target))
+                    .cloned()
+            })
+        });
+
+        let Some((position_name, position_info)) = override_position.or_else(|| {
+            best_resource_match(
+                &resource_name,
+                &position_resources,
+                &["position"],
+            )
+        }) else {
+            continue;
+        };
+
+        let override_texcoord_name = vb_overrides.and_then(|slots| {
+            ["vb0", "vb1", "vb2", "vb3"].iter().find_map(|slot| {
+                let target = slots.get(*slot)?;
+                texcoord_resources
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(target))
+                    .map(|(name, _)| name.clone())
+            })
+        });
+        let group_key = format!(
+            "{}|{}",
+            position_name.to_ascii_lowercase(),
+            override_texcoord_name
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        );
+
+        let (vertex_offset, vertex_count) = if let Some(existing) = loaded_position_groups.get(&group_key) {
+            *existing
+        } else {
+            let Some(pos_file) = position_info.filename.as_ref() else {
+                continue;
+            };
+            let pos_path = mod_root.join(pos_file);
+            if !pos_path.is_file() {
+                continue;
+            }
+
+            let pos_stride = position_info.stride.unwrap_or(40);
+            let (group_positions, group_normals) = read_position_normal_buffer(&pos_path, pos_stride)?;
+            if group_positions.len() < 3 {
+                continue;
+            }
+
+            let mut group_uvs = vec![[0.0_f32, 0.0_f32]; group_positions.len()];
+            let texcoord_choice = if let Some(override_name) = &override_texcoord_name {
+                texcoord_resources
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(override_name))
+                    .cloned()
+            } else {
+                best_resource_match(
+                    &position_name,
+                    &texcoord_resources,
+                    &["texcoord"],
+                )
+            };
+
+            if let Some((_, tex_info)) = texcoord_choice {
+                if let Some(tex_file) = tex_info.filename {
+                    let tex_path = mod_root.join(tex_file);
+                    if tex_path.is_file() {
+                        let tex_stride = tex_info.stride.unwrap_or(20);
+                        if let Ok(texcoords) = read_texcoord_buffer(&tex_path, tex_stride) {
+                            let copy_count = group_uvs.len().min(texcoords.len());
+                            group_uvs[..copy_count].copy_from_slice(&texcoords[..copy_count]);
+                        }
+                    }
+                }
+            }
+
+            let offset = positions.len() as u32;
+            let count = group_positions.len();
+            positions.extend(group_positions);
+            normals.extend(group_normals);
+            uvs.extend(group_uvs);
+            loaded_position_groups.insert(group_key, (offset, count));
+            (offset, count)
+        };
+
+        let Some(file_name) = info.filename else {
+            continue;
+        };
+        let ib_path = mod_root.join(&file_name);
+        if !ib_path.is_file() {
+            continue;
+        }
+
+        let raw_indices = read_u32_indices(&ib_path, info.format.as_deref())?;
+        if raw_indices.len() < 3 {
+            continue;
+        }
+
+        let part_start = indices.len();
+        for tri in raw_indices.chunks_exact(3) {
+            let a = tri[0] as usize;
+            let b = tri[1] as usize;
+            let c = tri[2] as usize;
+            if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+                continue;
+            }
+            indices.push(tri[0] + vertex_offset);
+            indices.push(tri[1] + vertex_offset);
+            indices.push(tri[2] + vertex_offset);
+        }
+
+        let part_count = indices.len().saturating_sub(part_start);
+        if part_count == 0 {
+            continue;
+        }
+
+        let file_stem = Path::new(&file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&resource_name);
+        parts.push(PreviewMeshPart {
+            name: format!("{}_{}", resource_name, file_stem),
+            index_start: part_start,
+            index_count: part_count,
+            first_index: first_index_by_ib_resource.get(&resource_name.to_ascii_lowercase()).copied(),
+            ib_resource: Some(resource_name.clone()),
+        });
+    }
+
+    if indices.len() < 3 {
+        return Ok(None);
+    }
+
+    Ok(Some(PreviewMeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+        parts,
+    }))
+}
+
+fn score_texture_for_part(part_name: &str, texture_path: &Path) -> i32 {
+    let lower_part = part_name.to_ascii_lowercase();
+    let file_name = texture_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let file_stem = texture_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let normalized_part = sanitize_material_name(&lower_part);
+    let mut score = score_diffuse_candidate(&file_name);
+
+    if !normalized_part.is_empty() {
+        if file_name.contains(&normalized_part) {
+            score += 150;
+        }
+
+        for token in normalized_part.split('_').filter(|token| token.len() >= 3) {
+            if file_name.contains(token) {
+                score += 35;
+            }
+        }
+    }
+
+    let part_tokens = extract_alnum_tokens(&normalized_part, 3);
+    let file_tokens = extract_alnum_tokens(&file_stem, 3);
+    for token in &part_tokens {
+        if file_tokens.iter().any(|item| item == token) {
+            score += 32;
+        }
+    }
+
+    let part_hex: Vec<&String> = part_tokens.iter().filter(|token| looks_like_hex_token(token)).collect();
+    let file_hex: Vec<&String> = file_tokens.iter().filter(|token| looks_like_hex_token(token)).collect();
+    for token in &part_hex {
+        if file_hex.iter().any(|item| *item == *token) {
+            score += 220;
+        }
+    }
+
+    if normalized_part.contains("head") && file_name.contains("head") {
+        score += 55;
+    }
+    if normalized_part.contains("hair") && file_name.contains("hair") {
+        score += 55;
+    }
+    if normalized_part.contains("body") && file_name.contains("body") {
+        score += 55;
+    }
+    if normalized_part.contains("dress") && file_name.contains("dress") {
+        score += 45;
+    }
+
+    if file_name.contains("normal") || file_name.contains("light") || file_name.contains("mask") {
+        score -= 90;
+    }
+
+    score
+}
+
+fn build_preview_texture_bindings(
+    parts: &[PreviewMeshPart],
+    mod_root: &Path,
+    ini_first_index_map: &HashMap<u32, String>,
+    ini_ib_texture_map: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let textures = collect_mod_texture_candidates(mod_root);
+    let mut bindings = HashMap::new();
+
+    for part in parts {
+        let key = sanitize_material_name(&part.name);
+        if key.is_empty() {
+            continue;
+        }
+
+        if let Some(first_index) = part.first_index {
+            if let Some(mapped) = ini_first_index_map.get(&first_index) {
+                bindings.insert(key, mapped.clone());
+                continue;
+            }
+        }
+
+        if let Some(ib_resource) = &part.ib_resource {
+            if let Some(mapped) = ini_ib_texture_map.get(&ib_resource.to_ascii_lowercase()) {
+                bindings.insert(key, mapped.clone());
+                continue;
+            }
+        }
+
+        let mut best: Option<(i32, PathBuf)> = None;
+        for texture_path in &textures {
+            let score = score_texture_for_part(&part.name, texture_path);
+            if score <= 0 {
+                continue;
+            }
+
+            match &best {
+                Some((current, _)) if score <= *current => {}
+                _ => {
+                    best = Some((score, texture_path.clone()));
+                }
+            }
+        }
+
+        if let Some((_, texture_path)) = best {
+            bindings.insert(key, normalize_path(&texture_path));
+        }
+    }
+
+    bindings
+}
+
+#[derive(Debug, Clone)]
+struct DumpVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+#[derive(Debug, Clone)]
+struct DumpVertexTemp {
+    position: Option<[f32; 3]>,
+    normal: Option<[f32; 3]>,
+    uv: Option<[f32; 2]>,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewMeshData {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+    parts: Vec<PreviewMeshPart>,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewMeshPart {
+    name: String,
+    index_start: usize,
+    index_count: usize,
+    first_index: Option<u32>,
+    ib_resource: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DumpPairSpec {
+    key: String,
+    vb_path: PathBuf,
+    ib_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct DumpIbData {
+    first_index: Option<u32>,
+    triangles: Vec<[u32; 3]>,
+}
+
+fn parse_f32_triplet(payload: &str) -> Option<[f32; 3]> {
+    let mut values = payload
+        .split(',')
+        .map(|value| value.trim().parse::<f32>().ok());
+    Some([values.next()??, values.next()??, values.next()??])
+}
+
+fn parse_f32_pair(payload: &str) -> Option<[f32; 2]> {
+    let mut values = payload
+        .split(',')
+        .map(|value| value.trim().parse::<f32>().ok());
+    Some([values.next()??, values.next()??])
+}
+
+fn collect_dump_text_pairs(dump_root: &Path) -> Result<Vec<DumpPairSpec>, String> {
+    let mut vb_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut ib_map: HashMap<String, PathBuf> = HashMap::new();
+    let mut stack = vec![dump_root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|err| err.to_string())? {
+            let entry = entry.map_err(|err| err.to_string())?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let Some(file_name_raw) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let file_name = file_name_raw.to_ascii_lowercase();
+            if !file_name.ends_with(".txt") {
+                continue;
+            }
+
+            if let Some((prefix, _)) = file_name.split_once("-vb0=") {
+                vb_map.insert(prefix.to_string(), path.clone());
+                continue;
+            }
+
+            if let Some((prefix, _)) = file_name.split_once("-ib=") {
+                ib_map.insert(prefix.to_string(), path.clone());
+            }
+        }
+    }
+
+    let mut keys: Vec<String> = vb_map
+        .keys()
+        .filter(|key| ib_map.contains_key(*key))
+        .cloned()
+        .collect();
+    keys.sort();
+
+    let mut pairs = Vec::new();
+    for key in keys {
+        if let (Some(vb_path), Some(ib_path)) = (vb_map.get(&key), ib_map.get(&key)) {
+            pairs.push(DumpPairSpec {
+                key,
+                vb_path: vb_path.clone(),
+                ib_path: ib_path.clone(),
+            });
+        }
+    }
+    Ok(pairs)
+}
+
+fn parse_dump_vb(path: &Path) -> Result<Vec<Option<DumpVertex>>, String> {
+    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let mut vertices: HashMap<usize, DumpVertexTemp> = HashMap::new();
+    let mut max_index: usize = 0;
+
+    for line in raw.lines() {
+        if !line.starts_with("vb0[") {
+            continue;
+        }
+
+        let Some(end_bracket) = line.find(']') else {
+            continue;
+        };
+        let Ok(vertex_index) = line[4..end_bracket].parse::<usize>() else {
+            continue;
+        };
+        max_index = max_index.max(vertex_index);
+
+        let entry = vertices.entry(vertex_index).or_insert(DumpVertexTemp {
+            position: None,
+            normal: None,
+            uv: None,
+        });
+
+        if let Some((_, payload)) = line.split_once("POSITION:") {
+            entry.position = parse_f32_triplet(payload);
+            continue;
+        }
+        if let Some((_, payload)) = line.split_once("NORMAL:") {
+            entry.normal = parse_f32_triplet(payload);
+            continue;
+        }
+        if line.contains("TEXCOORD:") && !line.contains("TEXCOORD1:") {
+            if let Some((_, payload)) = line.split_once("TEXCOORD:") {
+                entry.uv = parse_f32_pair(payload);
+            }
+        }
+    }
+
+    let mut result = vec![None; max_index + 1];
+    for (index, item) in vertices {
+        let Some(position) = item.position else {
+            continue;
+        };
+        result[index] = Some(DumpVertex {
+            position,
+            normal: item.normal.unwrap_or([0.0, 1.0, 0.0]),
+            uv: item.uv.unwrap_or([0.0, 0.0]),
+        });
+    }
+
+    Ok(result)
+}
+
+fn parse_dump_ib(path: &Path) -> Result<DumpIbData, String> {
+    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let mut first_index: Option<u32> = None;
+    let mut triangles = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.to_ascii_lowercase().starts_with("first index:") {
+            let value = trimmed
+                .split_once(':')
+                .map(|(_, rhs)| rhs.trim())
+                .and_then(|rhs| rhs.parse::<u32>().ok());
+            if value.is_some() {
+                first_index = value;
+            }
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() != 3 {
+            continue;
+        }
+
+        let Ok(a) = parts[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(b) = parts[1].parse::<u32>() else {
+            continue;
+        };
+        let Ok(c) = parts[2].parse::<u32>() else {
+            continue;
+        };
+
+        triangles.push([a, b, c]);
+    }
+
+    Ok(DumpIbData {
+        first_index,
+        triangles,
+    })
+}
+
+fn build_dump_preview_mesh(dump_root: &Path) -> Result<Option<PreviewMeshData>, String> {
+    let pairs = collect_dump_text_pairs(dump_root)?;
+    if pairs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut parts: Vec<PreviewMeshPart> = Vec::new();
+
+    for pair in pairs {
+        let vb_vertices = parse_dump_vb(&pair.vb_path)?;
+        let ib_data = parse_dump_ib(&pair.ib_path)?;
+        if vb_vertices.is_empty() || ib_data.triangles.is_empty() {
+            continue;
+        }
+
+        let mut remap = vec![u32::MAX; vb_vertices.len()];
+        for (vertex_index, maybe_vertex) in vb_vertices.iter().enumerate() {
+            let Some(vertex) = maybe_vertex else {
+                continue;
+            };
+            let mapped_index = positions.len() as u32;
+            remap[vertex_index] = mapped_index;
+            positions.push(vertex.position);
+            normals.push(vertex.normal);
+            uvs.push(vertex.uv);
+        }
+
+        let part_index_start = indices.len();
+        for tri in ib_data.triangles {
+            let a = tri[0] as usize;
+            let b = tri[1] as usize;
+            let c = tri[2] as usize;
+            if a >= remap.len() || b >= remap.len() || c >= remap.len() {
+                continue;
+            }
+
+            let ra = remap[a];
+            let rb = remap[b];
+            let rc = remap[c];
+            if ra == u32::MAX || rb == u32::MAX || rc == u32::MAX {
+                continue;
+            }
+
+            indices.push(ra);
+            indices.push(rb);
+            indices.push(rc);
+        }
+
+        let part_index_count = indices.len().saturating_sub(part_index_start);
+        if part_index_count > 0 {
+            parts.push(PreviewMeshPart {
+                name: pair.key,
+                index_start: part_index_start,
+                index_count: part_index_count,
+                first_index: ib_data.first_index,
+                ib_resource: None,
+            });
+        }
+    }
+
+    if positions.len() < 3 || indices.len() < 3 {
+        return Ok(None);
+    }
+
+    Ok(Some(PreviewMeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+        parts,
+    }))
+}
+
+fn create_preview_glb_from_mesh(output_path: &Path, mesh: &PreviewMeshData, metadata: &Value) -> Result<(), String> {
+    if mesh.positions.is_empty() || mesh.indices.is_empty() {
+        return Err("Mesh data is empty".to_string());
+    }
+
+    let mut position_bytes: Vec<u8> = Vec::with_capacity(mesh.positions.len() * 12);
+    let mut normal_bytes: Vec<u8> = Vec::with_capacity(mesh.normals.len() * 12);
+    let mut uv_bytes: Vec<u8> = Vec::with_capacity(mesh.uvs.len() * 8);
+
+    let mut min = [f32::INFINITY, f32::INFINITY, f32::INFINITY];
+    let mut max = [f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+
+    for position in &mesh.positions {
+        min[0] = min[0].min(position[0]);
+        min[1] = min[1].min(position[1]);
+        min[2] = min[2].min(position[2]);
+        max[0] = max[0].max(position[0]);
+        max[1] = max[1].max(position[1]);
+        max[2] = max[2].max(position[2]);
+        for component in position {
+            position_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+
+    for normal in &mesh.normals {
+        for component in normal {
+            normal_bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+
+    for uv in &mesh.uvs {
+        uv_bytes.extend_from_slice(&uv[0].to_le_bytes());
+        uv_bytes.extend_from_slice(&uv[1].to_le_bytes());
+    }
+
+    let mut binary = Vec::new();
+    let position_offset = 0usize;
+    binary.extend_from_slice(&position_bytes);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+    let normal_offset = binary.len();
+    binary.extend_from_slice(&normal_bytes);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+    let uv_offset = binary.len();
+    binary.extend_from_slice(&uv_bytes);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+    let mut buffer_views = vec![
+        json!({ "buffer": 0, "byteOffset": position_offset, "byteLength": position_bytes.len(), "target": 34962 }),
+        json!({ "buffer": 0, "byteOffset": normal_offset, "byteLength": normal_bytes.len(), "target": 34962 }),
+        json!({ "buffer": 0, "byteOffset": uv_offset, "byteLength": uv_bytes.len(), "target": 34962 }),
+    ];
+
+    let mut accessors = vec![
+        json!({
+            "bufferView": 0,
+            "componentType": 5126,
+            "count": mesh.positions.len(),
+            "type": "VEC3",
+            "min": min,
+            "max": max
+        }),
+        json!({
+            "bufferView": 1,
+            "componentType": 5126,
+            "count": mesh.normals.len(),
+            "type": "VEC3"
+        }),
+        json!({
+            "bufferView": 2,
+            "componentType": 5126,
+            "count": mesh.uvs.len(),
+            "type": "VEC2"
+        }),
+    ];
+
+    let mut materials: Vec<Value> = Vec::new();
+    let mut primitives: Vec<Value> = Vec::new();
+
+    let parts = if mesh.parts.is_empty() {
+        vec![PreviewMeshPart {
+            name: "full_mesh".to_string(),
+            index_start: 0,
+            index_count: mesh.indices.len(),
+            first_index: None,
+            ib_resource: None,
+        }]
+    } else {
+        mesh.parts.clone()
+    };
+
+    for (part_index, part) in parts.iter().enumerate() {
+        let begin = part.index_start.min(mesh.indices.len());
+        let end = (part.index_start + part.index_count).min(mesh.indices.len());
+        if end <= begin {
+            continue;
+        }
+
+        let mut part_index_bytes = Vec::with_capacity((end - begin) * 4);
+        for idx in &mesh.indices[begin..end] {
+            part_index_bytes.extend_from_slice(&idx.to_le_bytes());
+        }
+
+        let index_offset = binary.len();
+        binary.extend_from_slice(&part_index_bytes);
+        while binary.len() % 4 != 0 {
+            binary.push(0);
+        }
+
+        let index_view = buffer_views.len();
+        buffer_views.push(json!({
+            "buffer": 0,
+            "byteOffset": index_offset,
+            "byteLength": part_index_bytes.len(),
+            "target": 34963
+        }));
+
+        let index_accessor = accessors.len();
+        accessors.push(json!({
+            "bufferView": index_view,
+            "componentType": 5125,
+            "count": end - begin,
+            "type": "SCALAR"
+        }));
+
+        let material_name = sanitize_material_name(&part.name);
+        materials.push(json!({
+            "name": if material_name.is_empty() { format!("part_{part_index}") } else { material_name },
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                "metallicFactor": 0.0,
+                "roughnessFactor": 0.95
+            }
+        }));
+
+        primitives.push(json!({
+            "attributes": {
+                "POSITION": 0,
+                "NORMAL": 1,
+                "TEXCOORD_0": 2
+            },
+            "indices": index_accessor,
+            "material": materials.len() - 1,
+            "mode": 4
+        }));
+    }
+
+    if primitives.is_empty() {
+        return Err("No preview mesh primitives were generated.".to_string());
+    }
+
+    let gltf_json = json!({
+        "asset": { "version": "2.0", "generator": "mod-manager-v2 dump preview builder" },
+        "scene": 0,
+        "scenes": [{ "nodes": [0] }],
+        "nodes": [{ "mesh": 0, "name": "dump_preview" }],
+        "meshes": [{
+            "name": "dump_mesh",
+            "primitives": primitives
+        }],
+        "materials": materials,
+        "buffers": [{ "byteLength": binary.len() }],
+        "bufferViews": buffer_views,
+        "accessors": accessors,
+        "extras": metadata,
+    });
+
+    let mut json_bytes = serde_json::to_vec(&gltf_json).map_err(|err| err.to_string())?;
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(0x20);
+    }
+
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    let total_length = 12 + 8 + json_bytes.len() + 8 + binary.len();
+    glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+    glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json_bytes);
+    glb.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");
+    glb.extend_from_slice(&binary);
+
+    fs::write(output_path, glb).map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct PreviewPartSpec {
+    name: String,
+    translation: [f32; 3],
+    scale: [f32; 3],
+}
+
+fn collect_path_tokens_recursive(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        let token = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !token.is_empty() {
+            out.push(token);
+        }
+
+        if path.is_dir() {
+            collect_path_tokens_recursive(&path, out)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn contains_any_token(tokens: &[String], needles: &[&str]) -> bool {
+    tokens.iter().any(|token| needles.iter().any(|needle| token.contains(needle)))
+}
+
+fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartSpec> {
+    let mut tokens = Vec::new();
+    let _ = collect_path_tokens_recursive(dump_root, &mut tokens);
+    let _ = collect_path_tokens_recursive(mod_root, &mut tokens);
+
+    let mut parts = Vec::new();
+    let push_part = |parts: &mut Vec<PreviewPartSpec>, name: &str, translation: [f32; 3], scale: [f32; 3]| {
+        parts.push(PreviewPartSpec {
+            name: name.to_string(),
+            translation,
+            scale,
+        });
+    };
+
+    if contains_any_token(&tokens, &["body", "torso", "dress"]) {
+        push_part(&mut parts, "body", [0.0, 0.95, 0.0], [0.82, 1.12, 0.45]);
+    }
+    if contains_any_token(&tokens, &["dress", "skirt", "robe"]) {
+        push_part(&mut parts, "dress", [0.0, 0.35, 0.0], [1.0, 1.28, 0.58]);
+    }
+    if contains_any_token(&tokens, &["head", "face", "eyes", "mask", "bangs", "hair", "headpiece"]) {
+        push_part(&mut parts, "head", [0.0, 1.78, 0.0], [0.48, 0.56, 0.48]);
+    }
+    if contains_any_token(&tokens, &["hair", "bangs"]) {
+        push_part(&mut parts, "hair", [0.0, 1.92, 0.0], [0.68, 0.86, 0.68]);
+    }
+    if contains_any_token(&tokens, &["bangs"]) {
+        push_part(&mut parts, "bangs", [0.0, 1.73, 0.18], [0.56, 0.18, 0.10]);
+    }
+    if contains_any_token(&tokens, &["headpiece", "halo", "horn"]) {
+        push_part(&mut parts, "headpiece", [0.0, 2.08, 0.0], [0.56, 0.18, 0.56]);
+    }
+    if contains_any_token(&tokens, &["mask"]) {
+        push_part(&mut parts, "mask", [0.0, 1.63, 0.16], [0.34, 0.18, 0.08]);
+    }
+    if contains_any_token(&tokens, &["eyes", "eye"]) {
+        push_part(&mut parts, "eyes", [0.0, 1.64, 0.22], [0.24, 0.06, 0.03]);
+    }
+    if contains_any_token(&tokens, &["veil", "veilhead"]) {
+        push_part(&mut parts, "veil", [0.0, 1.48, -0.08], [0.95, 0.9, 0.08]);
+    }
+    if contains_any_token(&tokens, &["wing"]) {
+        push_part(&mut parts, "wing_left", [-1.02, 1.48, 0.08], [0.26, 0.78, 0.10]);
+        push_part(&mut parts, "wing_right", [1.02, 1.48, 0.08], [0.26, 0.78, 0.10]);
+    }
+    if contains_any_token(&tokens, &["transparency", "transparent", "extra"]) {
+        push_part(&mut parts, "transparency", [0.0, 0.84, 0.20], [0.92, 1.1, 0.1]);
+    }
+
+    if parts.is_empty() {
+        push_part(&mut parts, "body", [0.0, 0.95, 0.0], [0.82, 1.12, 0.45]);
+        push_part(&mut parts, "head", [0.0, 1.78, 0.0], [0.48, 0.56, 0.48]);
+        push_part(&mut parts, "hair", [0.0, 1.92, 0.0], [0.68, 0.86, 0.68]);
+        push_part(&mut parts, "dress", [0.0, 0.35, 0.0], [1.0, 1.28, 0.58]);
+    }
+
+    parts
+}
+
+fn create_cube_mesh_glb(output_path: &Path, parts: &[PreviewPartSpec], metadata: &Value) -> Result<(), String> {
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([0.0, 0.0, 1.0], [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]]),
+        ([0.0, 0.0, -1.0], [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]]),
+        ([1.0, 0.0, 0.0], [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]]),
+        ([-1.0, 0.0, 0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, 1.0, 0.0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]),
+        ([0.0, -1.0, 0.0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]),
+    ];
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+
+    for (face_index, (normal, corners)) in faces.iter().enumerate() {
+        let base = (face_index * 4) as u16;
+        for corner in corners {
+            for component in corner {
+                positions.extend_from_slice(&component.to_le_bytes());
+            }
+            for component in normal {
+                normals.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        indices.extend_from_slice(&base.to_le_bytes());
+        indices.extend_from_slice(&(base + 1).to_le_bytes());
+        indices.extend_from_slice(&(base + 2).to_le_bytes());
+        indices.extend_from_slice(&base.to_le_bytes());
+        indices.extend_from_slice(&(base + 2).to_le_bytes());
+        indices.extend_from_slice(&(base + 3).to_le_bytes());
+    }
+
+    let mut binary = Vec::new();
+    let position_offset = 0usize;
+    binary.extend_from_slice(&positions);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+    let normal_offset = binary.len();
+    binary.extend_from_slice(&normals);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+    let index_offset = binary.len();
+    binary.extend_from_slice(&indices);
+    while binary.len() % 4 != 0 {
+        binary.push(0);
+    }
+
+    let nodes: Vec<Value> = parts
+        .iter()
+        .map(|part| {
+            json!({
+                "mesh": 0,
+                "translation": part.translation,
+                "scale": part.scale,
+                "name": part.name,
+            })
+        })
+        .collect();
+    let scene_nodes: Vec<usize> = (0..parts.len()).collect();
+
+    let gltf_json = json!({
+        "asset": { "version": "2.0", "generator": "mod-manager-v2 preview builder" },
+        "scene": 0,
+        "scenes": [{ "nodes": scene_nodes }],
+        "nodes": nodes,
+        "meshes": [{
+            "name": "preview_cube",
+            "primitives": [{
+                "attributes": { "POSITION": 0, "NORMAL": 1 },
+                "indices": 2,
+                "material": 0,
+                "mode": 4
+            }]
+        }],
+        "materials": [{
+            "name": "preview_material",
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [0.88, 0.88, 0.95, 1.0],
+                "metallicFactor": 0.0,
+                "roughnessFactor": 0.92
+            }
+        }],
+        "buffers": [{ "byteLength": binary.len() }],
+        "bufferViews": [
+            { "buffer": 0, "byteOffset": position_offset, "byteLength": positions.len(), "target": 34962 },
+            { "buffer": 0, "byteOffset": normal_offset, "byteLength": normals.len(), "target": 34962 },
+            { "buffer": 0, "byteOffset": index_offset, "byteLength": indices.len(), "target": 34963 }
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": 24,
+                "type": "VEC3",
+                "min": [-0.5, -0.5, -0.5],
+                "max": [0.5, 0.5, 0.5]
+            },
+            {
+                "bufferView": 1,
+                "componentType": 5126,
+                "count": 24,
+                "type": "VEC3"
+            },
+            {
+                "bufferView": 2,
+                "componentType": 5123,
+                "count": 36,
+                "type": "SCALAR"
+            }
+        ],
+        "extras": metadata,
+    });
+
+    let mut json_bytes = serde_json::to_vec(&gltf_json).map_err(|err| err.to_string())?;
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(0x20);
+    }
+
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    let total_length = 12 + 8 + json_bytes.len() + 8 + binary.len();
+    glb.extend_from_slice(&(total_length as u32).to_le_bytes());
+    glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json_bytes);
+    glb.extend_from_slice(&(binary.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");
+    glb.extend_from_slice(&binary);
+
+    fs::write(output_path, glb).map_err(|err| err.to_string())
 }
 
 fn replace_dir_contents(src: &Path, dest: &Path) -> Result<(), String> {
@@ -3231,6 +5335,12 @@ fn download_and_install_mod_blocking(
         .args([
             "-L",
             "--fail",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "1",
+            "-A",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ModManagerV2",
             "-o",
             archive_path.to_str().unwrap_or_default(),
             &url,
@@ -3512,16 +5622,83 @@ fn install_archive_mod_blocking(
         ));
     }
 
+    fn has_any_files_recursive(dir: &Path) -> bool {
+        let entries = match fs::read_dir(dir) {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() {
+                return true;
+            }
+            if path.is_dir() && has_any_files_recursive(&path) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn resolve_best_extract_source(root: &Path) -> PathBuf {
+        let mut current = root.to_path_buf();
+
+        loop {
+            let entries = match fs::read_dir(&current) {
+                Ok(value) => value.filter_map(Result::ok).map(|e| e.path()).collect::<Vec<_>>(),
+                Err(_) => break,
+            };
+
+            let mut file_count = 0usize;
+            let mut only_child_dir: Option<PathBuf> = None;
+            let mut dir_count = 0usize;
+
+            for path in &entries {
+                if path.is_file() {
+                    file_count += 1;
+                } else if path.is_dir() {
+                    dir_count += 1;
+                    if only_child_dir.is_none() {
+                        only_child_dir = Some(path.clone());
+                    }
+                }
+            }
+
+            if file_count > 0 {
+                break;
+            }
+
+            if dir_count == 1 {
+                if let Some(next) = only_child_dir {
+                    current = next;
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        current
+    }
+
+    let source_path = resolve_best_extract_source(&extract_dir);
+    if !has_any_files_recursive(&source_path) {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Err(
+            "Archive extracted but contained no installable files. The source link may not be a direct archive download."
+                .to_string(),
+        );
+    }
+
     let entries: Vec<PathBuf> = fs::read_dir(&extract_dir)
         .map_err(|err| err.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
-
-    let source_path = if entries.len() == 1 && entries[0].is_dir() {
-        entries[0].clone()
-    } else {
-        extract_dir.clone()
-    };
+    if entries.is_empty() {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Err("Archive extraction did not produce files.".to_string());
+    }
 
     let dest_base = PathBuf::from(&dest_item_path);
     fs::create_dir_all(&dest_base).map_err(|err| err.to_string())?;
@@ -4234,6 +6411,33 @@ fn bootstrap_installation(
 }
 
 #[tauri::command]
+fn create_shortcut_from_settings(base_dir: Option<String>) -> Result<String, String> {
+    let install_base = base_dir
+        .map(PathBuf::from)
+        .or_else(|| detect_legacy_install().map(|install| PathBuf::from(install.base_dir)))
+        .or_else(resolve_install_base)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|value| value.to_path_buf()))
+        })
+        .ok_or_else(|| "No install location found".to_string())?;
+
+    let app_exe = {
+        let bundled = install_base.join("mod-manager-v2.exe");
+        if bundled.is_file() {
+            bundled
+        } else {
+            std::env::current_exe().map_err(|err| err.to_string())?
+        }
+    };
+
+    create_desktop_shortcut(&app_exe, &install_base)?;
+    let shortcut_path = desktop_shortcut_path()?;
+    Ok(normalize_path(&shortcut_path))
+}
+
+#[tauri::command]
 fn download_and_update_resources(
     url: String,
     latest_tag: Option<String>,
@@ -4461,6 +6665,8 @@ pub fn run() {
             copy_mod_preview_image,
             find_mod_preview_images,
             load_image_data_url,
+            load_file_data_url,
+            load_texture_data_url,
             load_images_data_urls,
             resolve_dev_background_data_url,
             apply_dev_window_icon,
@@ -4484,6 +6690,9 @@ pub fn run() {
             exit_for_update,
             download_and_replace_updater,
             bootstrap_installation
+            ,
+            create_shortcut_from_settings,
+            build_preview_glb_from_dump
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
