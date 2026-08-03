@@ -1909,7 +1909,7 @@ function App() {
         resources_url: string | null;
         exe_url: string | null;
         updater_url: string | null;
-      }>("check_for_updates");
+      }>("check_for_updates", { force: false });
 
       if (!info.updater_url || !info.resources_url) {
         setSaveMessage("Install setup failed: release assets for updater/resources are incomplete.");
@@ -1941,6 +1941,22 @@ function App() {
     } finally {
       setSavingSettings(false);
     }
+  }
+
+  async function handleSetupComplete() {
+    // Persist a baseline settings file so first-run detection stops forcing the wizard.
+    if (state?.needs_setup) {
+      try {
+        await invoke<string>("save_legacy_settings", {
+          baseDir: state.legacy_install?.base_dir ?? null,
+          settings: state.settings,
+        });
+      } catch {
+        // Best-effort: still try to continue to the manager UI.
+      }
+    }
+
+    await refresh();
   }
 
   async function handleCreateDesktopShortcut() {
@@ -2423,7 +2439,7 @@ function App() {
   }
 
   if (state?.needs_setup) {
-    return <SetupWizard state={state} onComplete={() => { void refresh(); }} />;
+    return <SetupWizard state={state} onComplete={() => { void handleSetupComplete(); }} />;
   }
 
   return (

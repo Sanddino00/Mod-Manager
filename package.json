@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:build:all": "tauri build && cargo build --manifest-path src-tauri/Cargo.toml --bin updater --release && node scripts/verify-release-artifacts.mjs",
+    "compile": "npm run tauri:build:all"
   },
   "dependencies": {
     "@borewit/text-codec": "^0.2.2",

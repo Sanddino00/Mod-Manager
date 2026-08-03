@@ -145,10 +145,17 @@ struct FixesPanelData {
 }
 
 #[derive(Debug, Serialize)]
+struct IniToggleVar {
+    name: String,
+    values: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct IniToggleEntry {
     name: String,
     key: String,
     back: Option<String>,
+    vars: Vec<IniToggleVar>,
 }
 
 #[derive(Debug, Serialize)]
@@ -550,6 +557,63 @@ fn load_fixes_info_text(resources_dir: &Path) -> String {
 }
 
 fn find_first_ini_file(mod_folder_path: &Path) -> Option<PathBuf> {
+    // Fast path for large merged packs: root-level merged ini is usually authoritative.
+    let preferred_root = ["merged.ini", "---merged.ini", "---merged - kopie.ini"];
+    for name in preferred_root {
+        let candidate = mod_folder_path.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(mod_folder_path) {
+        let mut root_ini_files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+            })
+            .collect::<Vec<_>>();
+
+        root_ini_files.sort_by(|left, right| {
+            let left_name = left
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let right_name = right
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+
+            let left_rank = if left_name == "merged.ini" {
+                0
+            } else if left_name.contains("merged") {
+                1
+            } else {
+                2
+            };
+            let right_rank = if right_name == "merged.ini" {
+                0
+            } else if right_name.contains("merged") {
+                1
+            } else {
+                2
+            };
+
+            left_rank.cmp(&right_rank).then_with(|| left_name.cmp(&right_name))
+        });
+
+        if let Some(root_ini) = root_ini_files.into_iter().next() {
+            return Some(root_ini);
+        }
+    }
+
     let mut stack = vec![mod_folder_path.to_path_buf()];
 
     while let Some(current_dir) = stack.pop() {
@@ -570,6 +634,14 @@ fn find_first_ini_file(mod_folder_path: &Path) -> Option<PathBuf> {
         }
 
         subdirs.sort();
+        subdirs.retain(|path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            name != "preview_build"
+        });
         ini_files.sort();
 
         if let Some(first_ini) = ini_files.into_iter().next() {
@@ -594,21 +666,25 @@ fn extract_ini_toggle_entries(ini_path: &Path) -> Vec<IniToggleEntry> {
     let mut current_name: Option<String> = None;
     let mut current_key: Option<String> = None;
     let mut current_back: Option<String> = None;
+    let mut current_vars: Vec<IniToggleVar> = Vec::new();
 
     let flush = |toggles: &mut Vec<IniToggleEntry>,
                  current_name: &mut Option<String>,
                  current_key: &mut Option<String>,
-                 current_back: &mut Option<String>| {
+                 current_back: &mut Option<String>,
+                 current_vars: &mut Vec<IniToggleVar>| {
         if let (Some(name), Some(key)) = (current_name.take(), current_key.take()) {
             toggles.push(IniToggleEntry {
                 name,
                 key,
                 back: current_back.take(),
+                vars: std::mem::take(current_vars),
             });
         } else {
             current_name.take();
             current_key.take();
             current_back.take();
+            current_vars.clear();
         }
     };
 
@@ -620,6 +696,7 @@ fn extract_ini_toggle_entries(ini_path: &Path) -> Vec<IniToggleEntry> {
                 &mut current_name,
                 &mut current_key,
                 &mut current_back,
+                &mut current_vars,
             );
             let section_name = &trimmed[1..trimmed.len().saturating_sub(1)];
             if section_name.to_ascii_lowercase().starts_with("key") {
@@ -639,6 +716,18 @@ fn extract_ini_toggle_entries(ini_path: &Path) -> Vec<IniToggleEntry> {
                 current_key = Some(value);
             } else if field == "back" {
                 current_back = Some(value);
+            } else if field.starts_with('$') {
+                let values = value
+                    .split(',')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect::<Vec<_>>();
+                if !values.is_empty() {
+                    current_vars.push(IniToggleVar {
+                        name: field,
+                        values,
+                    });
+                }
             }
         }
     }
@@ -648,6 +737,7 @@ fn extract_ini_toggle_entries(ini_path: &Path) -> Vec<IniToggleEntry> {
         &mut current_name,
         &mut current_key,
         &mut current_back,
+        &mut current_vars,
     );
     toggles
 }
@@ -1941,10 +2031,18 @@ fn build_preview_glb_from_dump(
     mod_path: String,
     output_dir: Option<String>,
 ) -> Result<PreviewBuildResult, String> {
-    let dump_root = PathBuf::from(dump_path.trim());
-    if !dump_root.is_dir() {
-        return Err("Dump path not found".to_string());
-    }
+    let dump_root = {
+        let value = dump_path.trim();
+        if value.is_empty() {
+            None
+        } else {
+            let candidate = PathBuf::from(value);
+            if !candidate.is_dir() {
+                return Err("Dump path not found".to_string());
+            }
+            Some(candidate)
+        }
+    };
 
     let mod_root = PathBuf::from(mod_path.trim());
     if !mod_root.is_dir() {
@@ -1977,7 +2075,7 @@ fn build_preview_glb_from_dump(
     let metadata_path = output_root.join("preview_toggles.json");
     let metadata_json = json!({
         "mod_path": normalize_path(&mod_root),
-        "dump_path": normalize_path(&dump_root),
+        "dump_path": dump_root.as_ref().map(|value| normalize_path(value)),
         "ini_path": ini_path.as_ref().map(|value| normalize_path(value)),
         "diffuse_texture_path": diffuse_texture_path.clone(),
         "texture_bindings": texture_bindings.clone(),
@@ -1994,10 +2092,10 @@ fn build_preview_glb_from_dump(
     let recipe_body = [
         "3DMigoto Preview Build Recipe",
         "",
-        "1) Use the dump folder from 3DMigoto/XXMI together with the installed mod folder.",
+        "1) Use the installed mod folder. Optionally provide a 3DMigoto/XXMI dump folder as a fallback source.",
         "2) Use preview_toggles.json to map Key sections to your preview tool toggles.",
         "3) The app first tries to build preview_model.glb from mod VB/IB binary buffers in the ini resources.",
-        "4) If that fails, it falls back to dump VB/IB text mesh data.",
+        "4) If that fails and a dump folder is provided, it falls back to dump VB/IB text mesh data.",
         "",
         "If no valid mesh is found, it falls back to a proxy model so preview still works.",
     ]
@@ -2008,10 +2106,12 @@ fn build_preview_glb_from_dump(
     let mesh_source = build_mod_binary_preview_mesh(&mod_root, ini_path.as_deref())?
         .map(|mesh| (mesh, "mod binary buffers".to_string()))
         .or_else(|| {
-            build_dump_preview_mesh(&dump_root)
-                .ok()
-                .flatten()
-                .map(|mesh| (mesh, "dump text mesh data".to_string()))
+            dump_root.as_ref().and_then(|root| {
+                build_dump_preview_mesh(root)
+                    .ok()
+                    .flatten()
+                    .map(|mesh| (mesh, "dump text mesh data".to_string()))
+            })
         });
 
     let message = if let Some((mesh, source_label)) = mesh_source {
@@ -2032,9 +2132,11 @@ fn build_preview_glb_from_dump(
             }
         }
 
+        texture_bindings = build_preview_texture_png_cache(&output_root, &texture_bindings);
+
         let metadata_json = json!({
             "mod_path": normalize_path(&mod_root),
-            "dump_path": normalize_path(&dump_root),
+            "dump_path": dump_root.as_ref().map(|value| normalize_path(value)),
             "ini_path": ini_path.as_ref().map(|value| normalize_path(value)),
             "diffuse_texture_path": diffuse_texture_path.clone(),
             "texture_bindings": texture_bindings.clone(),
@@ -2055,7 +2157,8 @@ fn build_preview_glb_from_dump(
             mesh.indices.len() / 3
         )
     } else {
-        let parts = discover_preview_parts(&dump_root, &mod_root);
+        let token_source = dump_root.as_ref().unwrap_or(&mod_root);
+        let parts = discover_preview_parts(token_source, &mod_root);
         create_cube_mesh_glb(&model_output, &parts, &metadata_json)?;
         "Preview model generated (proxy fallback).".to_string()
     };
@@ -2221,6 +2324,101 @@ fn load_file_data_url(path: String) -> Result<String, String> {
     Ok(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+fn resolve_preview_texture_bindings(
+    mod_path: String,
+    toggle_vars: HashMap<String, String>,
+    output_dir: Option<String>,
+) -> Result<HashMap<String, String>, String> {
+    let mod_root = PathBuf::from(mod_path.trim());
+    if !mod_root.is_dir() {
+        return Err("Mod folder not found".to_string());
+    }
+
+    let Some(ini_path) = find_first_ini_file(&mod_root) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut normalized_vars = HashMap::new();
+    for (key, value) in toggle_vars {
+        normalized_vars.insert(normalize_ini_var_name(&key), value.trim().to_string());
+    }
+
+    let ini_first_index_texture_map = parse_ini_first_index_texture_map(&ini_path, &mod_root);
+    let ini_ib_texture_map = parse_ini_ib_texture_by_resource_for_vars(&ini_path, &mod_root, &normalized_vars);
+
+    let output_root = output_dir
+        .as_ref()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| mod_root.join("preview_build"));
+
+    let metadata_path = output_root.join("preview_toggles.json");
+    let base_bindings = fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("texture_bindings").cloned())
+        .and_then(|value| serde_json::from_value::<HashMap<String, String>>(value).ok())
+        .unwrap_or_default();
+
+    if base_bindings.is_empty() {
+        let Some(mesh) = build_mod_binary_preview_mesh(&mod_root, Some(&ini_path))? else {
+            return Ok(HashMap::new());
+        };
+
+        return Ok(build_preview_texture_bindings(
+            &mesh.parts,
+            &mod_root,
+            &ini_first_index_texture_map,
+            &ini_ib_texture_map,
+        ));
+    }
+
+    let mut normalized_ib_lookup = ini_ib_texture_map
+        .iter()
+        .map(|(ib_resource, texture_path)| (sanitize_material_name(ib_resource), texture_path.clone()))
+        .collect::<Vec<_>>();
+    normalized_ib_lookup.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+
+    let mut resolved = HashMap::new();
+    for (material_key, existing_path) in base_bindings {
+        let lower_key = material_key.to_ascii_lowercase();
+        let replacement = normalized_ib_lookup
+            .iter()
+            .find(|(ib_key, _)| !ib_key.is_empty() && lower_key.starts_with(ib_key))
+            .map(|(_, texture_path)| texture_path.clone());
+
+        resolved.insert(material_key, replacement.unwrap_or(existing_path));
+    }
+
+    Ok(resolved)
+}
+
+#[tauri::command]
+fn resolve_preview_active_first_indices(
+    mod_path: String,
+    toggle_vars: HashMap<String, String>,
+) -> Result<Vec<u32>, String> {
+    let mod_root = PathBuf::from(mod_path.trim());
+    if !mod_root.is_dir() {
+        return Err("Mod folder not found".to_string());
+    }
+
+    let Some(ini_path) = find_first_ini_file(&mod_root) else {
+        return Ok(Vec::new());
+    };
+
+    let mut normalized_vars = parse_ini_default_vars(&ini_path);
+    for (key, value) in toggle_vars {
+        normalized_vars.insert(normalize_ini_var_name(&key), value.trim().to_string());
+    }
+
+    Ok(parse_ini_active_drawindexed_first_indices_for_vars(
+        &ini_path,
+        &normalized_vars,
     ))
 }
 
@@ -2444,7 +2642,7 @@ fn select_override_texture_resource(
     resource_files: &HashMap<String, String>,
     mod_root: &Path,
 ) -> Option<String> {
-    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut candidates: Vec<(String, String, i32)> = Vec::new();
 
     for slot in ["ps-t1", "ps-t0", "ps-t2", "ps-t3"] {
         let Some(resource_name) = slot_resources.get(slot) else {
@@ -2458,21 +2656,28 @@ fn select_override_texture_resource(
         if !path.exists() {
             continue;
         }
-        candidates.push((resource_name.clone(), file_name.clone()));
+        let score = score_diffuse_candidate(file_name);
+        candidates.push((resource_name.clone(), file_name.clone(), score));
     }
 
     if candidates.is_empty() {
         return None;
     }
 
-    let diffuse_candidate = candidates.iter().find(|(_, file_name)| {
-        file_name.to_ascii_lowercase().contains("diffuse")
-    });
-    if let Some((resource_name, _)) = diffuse_candidate {
-        return Some(resource_name.clone());
+    let mut best: Option<(String, i32)> = None;
+    for (resource_name, _, score) in candidates {
+        match &best {
+            Some((_, current_score)) if score <= *current_score => {}
+            _ => {
+                best = Some((resource_name, score));
+            }
+        }
     }
 
-    candidates.first().map(|(resource_name, _)| resource_name.clone())
+    match best {
+        Some((resource_name, score)) if score > 0 => Some(resource_name),
+        _ => None,
+    }
 }
 
 fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMap<u32, String> {
@@ -2579,6 +2784,71 @@ fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMa
         flush_override(current_first_index, &current_ps_slots, &mut first_index_to_texture);
     }
 
+    // WWMI-style overrides often assign textures through Resource\RabbitFX\Diffuse
+    // and use many drawindexed slices under conditional branches.
+    let mut vars = parse_ini_default_vars(ini_path);
+    vars.entry("$mod_enabled".to_string()).or_insert_with(|| "1".to_string());
+
+    let sections = parse_ini_sections(&raw);
+    for (section_name, lines) in &sections {
+        if !section_name.starts_with("textureoverride") {
+            continue;
+        }
+
+        let assignments = collect_active_ini_assignments(lines, &vars);
+        if assignments.is_empty() {
+            continue;
+        }
+
+        let mut diffuse_resource: Option<String> = None;
+        let mut ps_slots: HashMap<String, String> = HashMap::new();
+        let mut draw_ranges: Vec<(usize, usize)> = Vec::new();
+
+        for (key, value) in &assignments {
+            if key == r"resource\rabbitfx\diffuse" {
+                if let Some(resource) = parse_resource_ref(value) {
+                    diffuse_resource = Some(resource);
+                }
+            } else if key.starts_with("ps-t") {
+                ps_slots.insert(key.clone(), value.clone());
+            } else if key == "drawindexed" {
+                if let Some((count, first_index)) = parse_drawindexed_value(value) {
+                    if count > 0 {
+                        draw_ranges.push((count, first_index));
+                    }
+                }
+            }
+        }
+
+        if draw_ranges.is_empty() {
+            continue;
+        }
+
+        let texture_resource = if let Some(resource) = diffuse_resource {
+            Some(resource)
+        } else {
+            select_override_texture_resource(&ps_slots, &resource_files, mod_root)
+                .map(|value| value.to_ascii_lowercase())
+        };
+
+        let Some(texture_resource) = texture_resource else {
+            continue;
+        };
+        let Some(file_name) = resource_files.get(&texture_resource) else {
+            continue;
+        };
+
+        let path = mod_root.join(file_name);
+        if !path.exists() {
+            continue;
+        }
+
+        let normalized = normalize_path(&path);
+        for (_, first_index) in draw_ranges {
+            first_index_to_texture.insert(first_index as u32, normalized.clone());
+        }
+    }
+
     first_index_to_texture
 }
 
@@ -2637,29 +2907,9 @@ fn parse_ini_resource_buffers(ini_path: &Path) -> HashMap<String, IniResourceBuf
     resources
 }
 
-fn parse_ini_ib_first_index_by_resource(ini_path: &Path) -> HashMap<String, u32> {
-    let raw = match fs::read_to_string(ini_path) {
-        Ok(value) => value,
-        Err(_) => return HashMap::new(),
-    };
-
-    let mut map = HashMap::new();
-    let mut current_section = String::new();
-    let mut current_first_index: Option<u32> = None;
-    let mut current_ib_resource: Option<String> = None;
-
-    let flush_override = |section: &str, first_index: Option<u32>, ib_resource: Option<String>, out: &mut HashMap<String, u32>| {
-        if !section.to_ascii_lowercase().starts_with("textureoverride") {
-            return;
-        }
-        let Some(index) = first_index else {
-            return;
-        };
-        let Some(resource) = ib_resource else {
-            return;
-        };
-        out.insert(resource.to_ascii_lowercase(), index);
-    };
+fn parse_ini_sections(raw: &str) -> HashMap<String, Vec<String>> {
+    let mut sections: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current_section: Option<String> = None;
 
     for line in raw.lines() {
         let trimmed = line.split(';').next().unwrap_or("").trim();
@@ -2668,30 +2918,698 @@ fn parse_ini_ib_first_index_by_resource(ini_path: &Path) -> HashMap<String, u32>
         }
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            flush_override(&current_section, current_first_index, current_ib_resource.take(), &mut map);
-            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
-            current_first_index = None;
-            current_ib_resource = None;
+            let section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            current_section = Some(section.clone());
+            sections.entry(section).or_default();
             continue;
         }
 
-        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
-            continue;
-        }
-
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim().trim_matches('"');
-        if key == "match_first_index" {
-            current_first_index = value.parse::<u32>().ok();
-        } else if key == "ib" {
-            current_ib_resource = Some(value.to_string());
+        if let Some(section) = &current_section {
+            sections.entry(section.clone()).or_default().push(trimmed.to_string());
         }
     }
 
-    flush_override(&current_section, current_first_index, current_ib_resource.take(), &mut map);
+    sections
+}
+
+fn parse_ini_assignment(line: &str) -> Option<(String, String)> {
+    let (key, value) = line.split_once('=')?;
+    Some((
+        key.trim().to_ascii_lowercase(),
+        value.trim().trim_matches('"').to_string(),
+    ))
+}
+
+fn parse_ini_default_vars(ini_path: &Path) -> HashMap<String, String> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut defaults = HashMap::new();
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some((key, value)) = parse_ini_assignment(trimmed) else {
+            continue;
+        };
+        if !key.starts_with("global") {
+            continue;
+        }
+
+        // Handles patterns like: global persist $swapvar = 2
+        let Some((left, right)) = value.split_once('=') else {
+            continue;
+        };
+        let var_name = left.trim().split_whitespace().last().unwrap_or_default();
+        if !var_name.starts_with('$') {
+            continue;
+        }
+
+        let normalized = normalize_ini_var_name(var_name);
+        let selected = right.trim().trim_matches('"');
+        if selected.is_empty() {
+            continue;
+        }
+        defaults.insert(normalized, selected.to_string());
+    }
+
+    defaults
+}
+
+fn parse_resource_ref(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = if let Some(stripped) = trimmed.strip_prefix("ref ") {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate.to_ascii_lowercase())
+    }
+}
+
+fn parse_drawindexed_value(value: &str) -> Option<(usize, usize)> {
+    let mut parts = value.split(',').map(|entry| entry.trim());
+    let count = parts.next()?.parse::<usize>().ok()?;
+    let first_index = parts.next()?.parse::<usize>().ok()?;
+    Some((count, first_index))
+}
+
+fn collect_textureoverride_ib_resources(
+    section_lines: &[String],
+    sections: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut resources = Vec::new();
+    let mut seen = HashSet::new();
+
+    for ib in collect_ib_resources_from_lines(section_lines) {
+        if seen.insert(ib.clone()) {
+            resources.push(ib);
+        }
+    }
+
+    for run_target in collect_textureoverride_run_targets(section_lines, sections) {
+        let Some(run_lines) = sections.get(&run_target) else {
+            continue;
+        };
+        for ib in collect_ib_resources_from_lines(run_lines) {
+            if seen.insert(ib.clone()) {
+                resources.push(ib);
+            }
+        }
+    }
+
+    resources
+}
+
+fn normalize_ini_var_name(name: &str) -> String {
+    let trimmed = name.trim().trim_start_matches('$').to_ascii_lowercase();
+    format!("${trimmed}")
+}
+
+fn eval_ini_condition(condition: &str, vars: &HashMap<String, String>) -> bool {
+    let normalized = condition.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    for term in normalized.split("&&") {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+
+        let is_match = if let Some((left, right)) = term.split_once("==") {
+            let key = normalize_ini_var_name(left);
+            let expected = right.trim().trim_matches('"').trim_start_matches('$').to_ascii_lowercase();
+            let actual = vars
+                .get(&key)
+                .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+                .unwrap_or_default();
+            actual == expected
+        } else if let Some((left, right)) = term.split_once("!=") {
+            let key = normalize_ini_var_name(left);
+            let expected = right.trim().trim_matches('"').trim_start_matches('$').to_ascii_lowercase();
+            let actual = vars
+                .get(&key)
+                .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+                .unwrap_or_default();
+            actual != expected
+        } else if term.starts_with('$') {
+            let key = normalize_ini_var_name(term);
+            let actual = vars
+                .get(&key)
+                .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+                .unwrap_or_default();
+            !actual.is_empty() && actual != "0"
+        } else {
+            false
+        };
+
+        if !is_match {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn trim_wrapping_parens(value: &str) -> &str {
+    let mut out = value.trim();
+    while out.starts_with('(') && out.ends_with(')') && out.len() >= 2 {
+        out = out[1..out.len() - 1].trim();
+    }
+    out
+}
+
+fn eval_toggle_expression_term(term: &str, vars: &HashMap<String, String>) -> bool {
+    let value = trim_wrapping_parens(term);
+    if value.is_empty() {
+        return false;
+    }
+
+    if let Some(stripped) = value.strip_prefix('!') {
+        return !eval_toggle_expression_term(stripped, vars);
+    }
+
+    if let Some((left, right)) = value.split_once("==") {
+        let key = normalize_ini_var_name(left);
+        let expected = trim_wrapping_parens(right)
+            .trim_matches('"')
+            .trim_start_matches('$')
+            .to_ascii_lowercase();
+        let actual = vars
+            .get(&key)
+            .map(|entry| entry.trim().trim_matches('"').to_ascii_lowercase())
+            .unwrap_or_default();
+        return actual == expected;
+    }
+
+    if let Some((left, right)) = value.split_once("!=") {
+        let key = normalize_ini_var_name(left);
+        let expected = trim_wrapping_parens(right)
+            .trim_matches('"')
+            .trim_start_matches('$')
+            .to_ascii_lowercase();
+        let actual = vars
+            .get(&key)
+            .map(|entry| entry.trim().trim_matches('"').to_ascii_lowercase())
+            .unwrap_or_default();
+        return actual != expected;
+    }
+
+    if value.starts_with('$') {
+        let key = normalize_ini_var_name(value);
+        let actual = vars
+            .get(&key)
+            .map(|entry| entry.trim().trim_matches('"').to_ascii_lowercase())
+            .unwrap_or_default();
+        return !actual.is_empty() && actual != "0";
+    }
+
+    false
+}
+
+fn eval_toggle_expression(value: &str, vars: &HashMap<String, String>) -> bool {
+    for or_term in value.split("||") {
+        let and_ok = or_term
+            .split("&&")
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .all(|term| eval_toggle_expression_term(term, vars));
+        if and_ok {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn apply_commandlist_process_toggles_vars(
+    sections: &HashMap<String, Vec<String>>,
+    vars: &mut HashMap<String, String>,
+) {
+    let Some(lines) = sections.get("commandlistprocesstoggles") else {
+        return;
+    };
+
+    for line in lines {
+        let Some((key, value)) = parse_ini_assignment(line) else {
+            continue;
+        };
+        if !key.starts_with('$') {
+            continue;
+        }
+        if !key.starts_with("$draw_component_") {
+            continue;
+        }
+
+        let enabled = eval_toggle_expression(&value, vars);
+        vars.insert(key, if enabled { "1".to_string() } else { "0".to_string() });
+    }
+}
+
+fn parse_ini_active_drawindexed_first_indices_for_vars(
+    ini_path: &Path,
+    vars: &HashMap<String, String>,
+) -> Vec<u32> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let sections = parse_ini_sections(&raw);
+    let mut working_vars = vars.clone();
+    working_vars
+        .entry("$mod_enabled".to_string())
+        .or_insert_with(|| "1".to_string());
+
+    apply_commandlist_process_toggles_vars(&sections, &mut working_vars);
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (section_name, lines) in &sections {
+        if !section_name.starts_with("textureoverride") {
+            continue;
+        }
+
+        let assignments = collect_active_ini_assignments(lines, &working_vars);
+        for (key, value) in assignments {
+            if key != "drawindexed" {
+                continue;
+            }
+
+            let Some((count, first_index)) = parse_drawindexed_value(&value) else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+
+            let marker = first_index as u32;
+            if seen.insert(marker) {
+                out.push(marker);
+            }
+        }
+    }
+
+    out.sort_unstable();
+    out
+}
+
+#[derive(Clone, Copy)]
+struct IniIfFrame {
+    parent_active: bool,
+    current_active: bool,
+    any_taken: bool,
+}
+
+fn collect_active_ini_assignments(
+    lines: &[String],
+    vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut stack: Vec<IniIfFrame> = Vec::new();
+    let mut out = Vec::new();
+
+    let is_effective_active = |frames: &[IniIfFrame]| -> bool {
+        frames.iter().all(|frame| frame.current_active)
+    };
+
+    for raw_line in lines {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("if ") {
+            let condition = line[3..].trim();
+            let parent_active = is_effective_active(&stack);
+            let this_active = parent_active && eval_ini_condition(condition, vars);
+            stack.push(IniIfFrame {
+                parent_active,
+                current_active: this_active,
+                any_taken: this_active,
+            });
+            continue;
+        }
+
+        if lower.starts_with("else if ") {
+            if let Some(frame) = stack.last_mut() {
+                if !frame.parent_active || frame.any_taken {
+                    frame.current_active = false;
+                } else {
+                    let condition = line[8..].trim();
+                    let this_active = eval_ini_condition(condition, vars);
+                    frame.current_active = this_active;
+                    if this_active {
+                        frame.any_taken = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if lower == "else" {
+            if let Some(frame) = stack.last_mut() {
+                let this_active = frame.parent_active && !frame.any_taken;
+                frame.current_active = this_active;
+                if this_active {
+                    frame.any_taken = true;
+                }
+            }
+            continue;
+        }
+
+        if lower == "endif" {
+            let _ = stack.pop();
+            continue;
+        }
+
+        if !is_effective_active(&stack) {
+            continue;
+        }
+
+        if let Some((key, value)) = parse_ini_assignment(line) {
+            out.push((key, value));
+        }
+    }
+
+    out
+}
+
+fn collect_run_targets_from_assignments(
+    assignments: &[(String, String)],
+    sections: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (key, value) in assignments {
+        if key != "run" {
+            continue;
+        }
+
+        let candidate = value.to_ascii_lowercase();
+        if sections.contains_key(&candidate) && seen.insert(candidate.clone()) {
+            targets.push(candidate);
+        }
+    }
+
+    targets
+}
+
+fn collect_ib_texture_slot_candidates_from_assignments(
+    assignments: &[(String, String)],
+) -> Vec<(String, HashMap<String, String>)> {
+    let mut out = Vec::new();
+    let mut current_ib: Option<String> = None;
+    let mut current_ps_slots: HashMap<String, String> = HashMap::new();
+
+    let flush = |out_map: &mut Vec<(String, HashMap<String, String>)>,
+                 ib: &mut Option<String>,
+                 slots: &mut HashMap<String, String>| {
+        if let Some(resource) = ib.take() {
+            if !slots.is_empty() {
+                out_map.push((resource, slots.clone()));
+            }
+        }
+        slots.clear();
+    };
+
+    for (key, value) in assignments {
+        if key == "ib" {
+            flush(&mut out, &mut current_ib, &mut current_ps_slots);
+            if value.eq_ignore_ascii_case("null") {
+                current_ib = None;
+            } else {
+                current_ib = Some(value.to_ascii_lowercase());
+            }
+        } else if key.starts_with("ps-t") {
+            if current_ib.is_some() {
+                current_ps_slots.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    flush(&mut out, &mut current_ib, &mut current_ps_slots);
+    out
+}
+
+fn parse_ini_ib_texture_by_resource_for_vars(
+    ini_path: &Path,
+    mod_root: &Path,
+    vars: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut resource_files: HashMap<String, String> = HashMap::new();
+    let mut current_resource: Option<String> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.split(';').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if section.to_ascii_lowercase().starts_with("resource") {
+                current_resource = Some(section.to_ascii_lowercase());
+            } else {
+                current_resource = None;
+            }
+            continue;
+        }
+
+        let Some(resource_name) = &current_resource else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("filename") {
+            continue;
+        }
+
+        let file_name = value.trim().trim_matches('"').to_string();
+        if !is_image_texture_name(&file_name) {
+            continue;
+        }
+        resource_files.insert(resource_name.clone(), file_name);
+    }
+
+    let sections = parse_ini_sections(&raw);
+    let mut out: HashMap<String, String> = HashMap::new();
+
+    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>, out_map: &mut HashMap<String, String>| {
+        for (ib_resource, slot_resources) in pairs {
+            let Some(resource_name) =
+                select_override_texture_resource(&slot_resources, &resource_files, mod_root)
+            else {
+                continue;
+            };
+
+            let key = resource_name.to_ascii_lowercase();
+            let Some(file_name) = resource_files.get(&key) else {
+                continue;
+            };
+
+            let texture_path = mod_root.join(file_name);
+            if texture_path.is_file() {
+                out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+            }
+        }
+    };
+
+    fn collect_texture_candidates_for_section(
+        section_name: &str,
+        sections: &HashMap<String, Vec<String>>,
+        vars: &HashMap<String, String>,
+        visited: &mut HashSet<String>,
+    ) -> Vec<(String, HashMap<String, String>)> {
+        if !visited.insert(section_name.to_string()) {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        let Some(lines) = sections.get(section_name) else {
+            return out;
+        };
+
+        let assignments = collect_active_ini_assignments(lines, vars);
+        out.extend(collect_ib_texture_slot_candidates_from_assignments(&assignments));
+
+        for target in collect_run_targets_from_assignments(&assignments, sections) {
+            out.extend(collect_texture_candidates_for_section(
+                &target,
+                sections,
+                vars,
+                visited,
+            ));
+        }
+
+        out
+    }
+
+    for section_name in sections.keys() {
+        if !section_name.starts_with("textureoverride") {
+            continue;
+        }
+
+        let mut visited = HashSet::new();
+        let pairs = collect_texture_candidates_for_section(section_name, &sections, vars, &mut visited);
+        apply_candidates(pairs, &mut out);
+    }
+
+    out
+}
+
+fn collect_textureoverride_run_targets(
+    lines: &[String],
+    sections: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in lines {
+        let Some((key, value)) = parse_ini_assignment(line) else {
+            continue;
+        };
+        if key != "run" {
+            continue;
+        }
+
+        let candidate = value.to_ascii_lowercase();
+        if sections.contains_key(&candidate) && seen.insert(candidate.clone()) {
+            targets.push(candidate);
+        }
+    }
+
+    targets
+}
+
+fn collect_ib_resources_from_lines(lines: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in lines {
+        let Some((key, value)) = parse_ini_assignment(line) else {
+            continue;
+        };
+        if key != "ib" {
+            continue;
+        }
+        if value.eq_ignore_ascii_case("null") {
+            continue;
+        }
+
+        let normalized = value.to_ascii_lowercase();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+
+    out
+}
+
+fn collect_ib_texture_slot_candidates(lines: &[String]) -> Vec<(String, HashMap<String, String>)> {
+    let mut out = Vec::new();
+    let mut current_ib: Option<String> = None;
+    let mut current_ps_slots: HashMap<String, String> = HashMap::new();
+
+    let flush = |out_map: &mut Vec<(String, HashMap<String, String>)>,
+                     ib: &mut Option<String>,
+                     slots: &mut HashMap<String, String>| {
+        if let Some(resource) = ib.take() {
+            if !slots.is_empty() {
+                out_map.push((resource, slots.clone()));
+            }
+        }
+        slots.clear();
+    };
+
+    for line in lines {
+        let Some((key, value)) = parse_ini_assignment(line) else {
+            continue;
+        };
+
+        if key == "ib" {
+            flush(&mut out, &mut current_ib, &mut current_ps_slots);
+            if value.eq_ignore_ascii_case("null") {
+                current_ib = None;
+            } else {
+                current_ib = Some(value.to_ascii_lowercase());
+            }
+        } else if key.starts_with("ps-t") {
+            if current_ib.is_some() {
+                current_ps_slots.insert(key, value);
+            }
+        }
+    }
+
+    flush(&mut out, &mut current_ib, &mut current_ps_slots);
+    out
+}
+
+fn parse_ini_ib_first_index_by_resource(ini_path: &Path) -> HashMap<String, u32> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let sections = parse_ini_sections(&raw);
+    let mut map = HashMap::new();
+
+    for (section_name, lines) in &sections {
+        if !section_name.starts_with("textureoverride") {
+            continue;
+        }
+
+        let mut first_index: Option<u32> = None;
+        for line in lines {
+            let Some((key, value)) = parse_ini_assignment(line) else {
+                continue;
+            };
+            if key == "match_first_index" {
+                first_index = value.parse::<u32>().ok();
+                break;
+            }
+        }
+
+        let Some(index) = first_index else {
+            continue;
+        };
+
+        for ib in collect_ib_resources_from_lines(lines) {
+            map.insert(ib, index);
+        }
+
+        for run_target in collect_textureoverride_run_targets(lines, &sections) {
+            let Some(run_lines) = sections.get(&run_target) else {
+                continue;
+            };
+            for ib in collect_ib_resources_from_lines(run_lines) {
+                map.insert(ib, index);
+            }
+        }
+    }
+
     map
 }
 
@@ -2737,69 +3655,103 @@ fn parse_ini_ib_texture_by_resource(ini_path: &Path, mod_root: &Path) -> HashMap
         resource_files.insert(resource_name.clone(), file_name);
     }
 
+    let sections = parse_ini_sections(&raw);
     let mut out: HashMap<String, String> = HashMap::new();
-    let mut current_section = String::new();
-    let mut current_ib: Option<String> = None;
-    let mut current_ps_slots: HashMap<String, String> = HashMap::new();
 
-    let flush_override = |section: &str,
-                          ib_resource: Option<String>,
-                          slot_resources: &HashMap<String, String>,
-                          out_map: &mut HashMap<String, String>| {
-        if !section.to_ascii_lowercase().starts_with("textureoverride") {
-            return;
-        }
+    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>, out_map: &mut HashMap<String, String>| {
+        for (ib_resource, slot_resources) in pairs {
+            let Some(resource_name) =
+                select_override_texture_resource(&slot_resources, &resource_files, mod_root)
+            else {
+                continue;
+            };
 
-        let Some(ib_resource) = ib_resource else {
-            return;
-        };
+            let key = resource_name.to_ascii_lowercase();
+            let Some(file_name) = resource_files.get(&key) else {
+                continue;
+            };
 
-        let Some(resource_name) = select_override_texture_resource(slot_resources, &resource_files, mod_root) else {
-            return;
-        };
-
-        let key = resource_name.to_ascii_lowercase();
-        let Some(file_name) = resource_files.get(&key) else {
-            return;
-        };
-
-        let texture_path = mod_root.join(file_name);
-        if texture_path.is_file() {
-            out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+            let texture_path = mod_root.join(file_name);
+            if texture_path.is_file() {
+                out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+            }
         }
     };
 
-    for line in raw.lines() {
-        let trimmed = line.split(';').next().unwrap_or("").trim();
-        if trimmed.is_empty() {
+    for (section_name, lines) in &sections {
+        if !section_name.starts_with("textureoverride") {
             continue;
         }
 
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            flush_override(&current_section, current_ib.take(), &current_ps_slots, &mut out);
-            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
-            current_ib = None;
-            current_ps_slots.clear();
-            continue;
-        }
+        apply_candidates(collect_ib_texture_slot_candidates(lines), &mut out);
 
-        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
-            continue;
-        }
-
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim().trim_matches('"').to_string();
-        if key == "ib" {
-            current_ib = Some(value);
-        } else if key.starts_with("ps-t") {
-            current_ps_slots.insert(key, value);
+        for run_target in collect_textureoverride_run_targets(lines, &sections) {
+            let Some(run_lines) = sections.get(&run_target) else {
+                continue;
+            };
+            apply_candidates(collect_ib_texture_slot_candidates(run_lines), &mut out);
         }
     }
 
-    flush_override(&current_section, current_ib.take(), &current_ps_slots, &mut out);
+    out
+}
+
+fn parse_ini_drawindexed_ranges_by_ib_resource(ini_path: &Path) -> HashMap<String, Vec<(usize, usize)>> {
+    let raw = match fs::read_to_string(ini_path) {
+        Ok(value) => value,
+        Err(_) => return HashMap::new(),
+    };
+
+    let sections = parse_ini_sections(&raw);
+    let mut out: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
+    for (section_name, lines) in &sections {
+        if !section_name.starts_with("textureoverride") {
+            continue;
+        }
+
+        let ib_resources = collect_textureoverride_ib_resources(lines, &sections);
+        if ib_resources.is_empty() {
+            continue;
+        }
+
+        let mut ranges = Vec::new();
+        let mut seen = HashSet::new();
+        for line in lines {
+            let Some((key, value)) = parse_ini_assignment(line) else {
+                continue;
+            };
+            if key != "drawindexed" {
+                continue;
+            }
+
+            let Some((count, first_index)) = parse_drawindexed_value(&value) else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            if seen.insert((count, first_index)) {
+                ranges.push((count, first_index));
+            }
+        }
+
+        if ranges.is_empty() {
+            continue;
+        }
+
+        for ib in ib_resources {
+            out.entry(ib.to_ascii_lowercase())
+                .or_default()
+                .extend(ranges.iter().copied());
+        }
+    }
+
+    for values in out.values_mut() {
+        values.sort_by_key(|(_, first_index)| *first_index);
+        values.dedup();
+    }
+
     out
 }
 
@@ -3033,21 +3985,40 @@ fn common_prefix_len(left: &str, right: &str) -> usize {
     count
 }
 
+fn trailing_numeric_suffix(value: &str) -> Option<&str> {
+    let (_, suffix) = value.rsplit_once('.')?;
+    if suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        Some(suffix)
+    } else {
+        None
+    }
+}
+
 fn best_resource_match(
     target: &str,
     candidates: &[(String, IniResourceBufferInfo)],
     suffixes: &[&str],
 ) -> Option<(String, IniResourceBufferInfo)> {
     let target_norm = strip_resource_suffix(&normalize_resource_name(target), suffixes);
+    let target_variant = trailing_numeric_suffix(target);
     let mut best: Option<(i32, String, IniResourceBufferInfo)> = None;
 
     for (name, info) in candidates {
         let candidate_norm = strip_resource_suffix(&normalize_resource_name(name), suffixes);
+        let candidate_variant = trailing_numeric_suffix(name);
         let mut score = common_prefix_len(&target_norm, &candidate_norm) as i32;
         if target_norm == candidate_norm {
             score += 10_000;
         } else if target_norm.contains(&candidate_norm) || candidate_norm.contains(&target_norm) {
             score += 500;
+        }
+
+        if let (Some(left), Some(right)) = (target_variant, candidate_variant) {
+            if left == right {
+                score += 2_000;
+            } else {
+                score -= 250;
+            }
         }
 
         match &best {
@@ -3081,8 +4052,19 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
         };
         let lower_file = filename.to_ascii_lowercase();
         let lower_name = name.to_ascii_lowercase();
+        let lower_format = info.format.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let looks_like_uint_index_format = lower_format.contains("r16_uint")
+            || lower_format.contains("r32_uint")
+            || lower_format.contains("dxgi_format_r16_uint")
+            || lower_format.contains("dxgi_format_r32_uint");
 
-        if lower_file.ends_with(".ib") {
+        let is_index_buffer = lower_file.ends_with(".ib")
+            || (lower_file.ends_with(".buf")
+                && (lower_name.contains("index")
+                    || lower_name.ends_with("ib")
+                    || looks_like_uint_index_format));
+
+        if is_index_buffer {
             ib_resources.push((name.clone(), info.clone()));
             continue;
         }
@@ -3109,6 +4091,7 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
     let mut loaded_position_groups: HashMap<String, (u32, usize)> = HashMap::new();
 
     let first_index_by_ib_resource = parse_ini_ib_first_index_by_resource(ini_path);
+    let draw_ranges_by_ib_resource = parse_ini_drawindexed_ranges_by_ib_resource(ini_path);
     let ib_vertex_resources = parse_ini_ib_vertex_resources(ini_path);
     let mut indices = Vec::new();
     let mut parts = Vec::new();
@@ -3220,36 +4203,62 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
         if raw_indices.len() < 3 {
             continue;
         }
-
-        let part_start = indices.len();
-        for tri in raw_indices.chunks_exact(3) {
-            let a = tri[0] as usize;
-            let b = tri[1] as usize;
-            let c = tri[2] as usize;
-            if a >= vertex_count || b >= vertex_count || c >= vertex_count {
-                continue;
-            }
-            indices.push(tri[0] + vertex_offset);
-            indices.push(tri[1] + vertex_offset);
-            indices.push(tri[2] + vertex_offset);
-        }
-
-        let part_count = indices.len().saturating_sub(part_start);
-        if part_count == 0 {
-            continue;
-        }
-
         let file_stem = Path::new(&file_name)
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or(&resource_name);
-        parts.push(PreviewMeshPart {
-            name: format!("{}_{}", resource_name, file_stem),
-            index_start: part_start,
-            index_count: part_count,
-            first_index: first_index_by_ib_resource.get(&resource_name.to_ascii_lowercase()).copied(),
-            ib_resource: Some(resource_name.clone()),
-        });
+        let ib_key = resource_name.to_ascii_lowercase();
+        let draw_ranges = draw_ranges_by_ib_resource
+            .get(&ib_key)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut append_range = |range_count: usize, range_start: usize, first_index_hint: Option<u32>| {
+            if range_start >= raw_indices.len() || range_count == 0 {
+                return;
+            }
+
+            let range_end = range_start.saturating_add(range_count).min(raw_indices.len());
+            let part_start = indices.len();
+            for tri in raw_indices[range_start..range_end].chunks_exact(3) {
+                let a = tri[0] as usize;
+                let b = tri[1] as usize;
+                let c = tri[2] as usize;
+                if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+                    continue;
+                }
+                indices.push(tri[0] + vertex_offset);
+                indices.push(tri[1] + vertex_offset);
+                indices.push(tri[2] + vertex_offset);
+            }
+
+            let part_count = indices.len().saturating_sub(part_start);
+            if part_count == 0 {
+                return;
+            }
+
+            let first_index = first_index_hint.or_else(|| Some(range_start as u32));
+            let first_index_label = first_index.map(|value| format!("fi{value}")).unwrap_or_default();
+            parts.push(PreviewMeshPart {
+                name: format!("{}_{}_{}", resource_name, first_index_label, file_stem),
+                index_start: part_start,
+                index_count: part_count,
+                first_index,
+                ib_resource: Some(resource_name.clone()),
+            });
+        };
+
+        if draw_ranges.is_empty() {
+            append_range(
+                raw_indices.len(),
+                0,
+                first_index_by_ib_resource.get(&ib_key).copied(),
+            );
+        } else {
+            for (count, first_index) in draw_ranges {
+                append_range(count, first_index, Some(first_index as u32));
+            }
+        }
     }
 
     if indices.len() < 3 {
@@ -4085,6 +5094,89 @@ fn create_cube_mesh_glb(output_path: &Path, parts: &[PreviewPartSpec], metadata:
     glb.extend_from_slice(&binary);
 
     fs::write(output_path, glb).map_err(|err| err.to_string())
+}
+
+fn encode_texture_as_png(source_path: &Path) -> Result<Vec<u8>, String> {
+    let ext = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if ext == "dds" {
+        let bytes = fs::read(source_path).map_err(|err| err.to_string())?;
+        let mut cursor = Cursor::new(&bytes);
+        let dds = Dds::read(&mut cursor).map_err(|err| format!("Failed to parse DDS: {err}"))?;
+        let image = image_dds::image_from_dds(&dds, 0)
+            .map_err(|err| format!("Failed to decode DDS: {err}"))?;
+
+        let mut encoded_png = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut encoded_png), ImageFormat::Png)
+            .map_err(|err| format!("Failed to encode PNG: {err}"))?;
+        return Ok(encoded_png);
+    }
+
+    let bytes = fs::read(source_path).map_err(|err| err.to_string())?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|err| format!("Failed to decode image: {err}"))?;
+
+    let mut encoded_png = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut encoded_png), ImageFormat::Png)
+        .map_err(|err| format!("Failed to encode PNG: {err}"))?;
+    Ok(encoded_png)
+}
+
+fn build_preview_texture_png_cache(
+    output_root: &Path,
+    bindings: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    if bindings.is_empty() {
+        return HashMap::new();
+    }
+
+    let textures_dir = output_root.join("textures");
+    if fs::create_dir_all(&textures_dir).is_err() {
+        return bindings.clone();
+    }
+
+    let mut next = HashMap::new();
+    let mut used_names = HashSet::new();
+
+    for (material_key, source_path) in bindings {
+        let source = PathBuf::from(source_path);
+        if !source.is_file() {
+            next.insert(material_key.clone(), source_path.clone());
+            continue;
+        }
+
+        let mut file_stem = sanitize_material_name(material_key);
+        if file_stem.is_empty() {
+            file_stem = "texture".to_string();
+        }
+
+        let mut candidate = file_stem.clone();
+        let mut counter = 2usize;
+        while !used_names.insert(candidate.clone()) {
+            candidate = format!("{file_stem}_{counter}");
+            counter += 1;
+        }
+
+        let target = textures_dir.join(format!("{candidate}.png"));
+        match encode_texture_as_png(&source)
+            .and_then(|png_bytes| fs::write(&target, png_bytes).map_err(|err| err.to_string()))
+        {
+            Ok(_) => {
+                next.insert(material_key.clone(), normalize_path(&target));
+            }
+            Err(_) => {
+                next.insert(material_key.clone(), source_path.clone());
+            }
+        }
+    }
+
+    next
 }
 
 fn replace_dir_contents(src: &Path, dest: &Path) -> Result<(), String> {
@@ -6692,7 +7784,9 @@ pub fn run() {
             bootstrap_installation
             ,
             create_shortcut_from_settings,
-            build_preview_glb_from_dump
+            build_preview_glb_from_dump,
+            resolve_preview_texture_bindings,
+            resolve_preview_active_first_indices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

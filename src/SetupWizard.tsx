@@ -19,7 +19,7 @@ import type { BootstrapState, GameKey } from "./types";
 
 interface Props {
   state: BootstrapState;
-  onComplete: () => void;
+  onComplete: () => void | Promise<void>;
 }
 
 type Step = "welcome" | "games" | "scaffold" | "installing" | "done";
@@ -106,7 +106,7 @@ export function SetupWizard({ state, onComplete }: Props) {
         resources_url: string | null;
         exe_url: string | null;
         updater_url: string | null;
-      }>("check_for_updates");
+      }>("check_for_updates", { force: false });
 
       if (!info.updater_url || !info.resources_url) {
         setInstallError("Could not fetch release assets. Check your internet connection.");
