@@ -56,23 +56,7 @@ Supported Games:
 
 Screenshoots:
 --
-<img width="3212" height="1344" alt="image" src="https://github.com/user-attachments/assets/49bd5f3d-fad5-4f7c-bf9d-cc0c0411dd11" />
 
-<img width="3214" height="1355" alt="image" src="https://github.com/user-attachments/assets/b8022b5c-05c8-47f4-8449-0a0e942719de" />
-
-<img width="3219" height="1340" alt="image" src="https://github.com/user-attachments/assets/0507350e-a192-4c12-9136-06e50cfd81a2" />
-
-<img width="3220" height="1360" alt="image" src="https://github.com/user-attachments/assets/77ba4760-96b8-46ec-a09b-aa3468e97a28" />
-
-<img width="3216" height="1352" alt="image" src="https://github.com/user-attachments/assets/66fc145c-0eeb-4bee-a311-a12052fbe42f" />
-
-<img width="3132" height="665" alt="image" src="https://github.com/user-attachments/assets/3e109fc5-2d31-446f-8379-6393bb7379a5" />
-
-<img width="3221" height="1348" alt="image" src="https://github.com/user-attachments/assets/68519098-fe0a-4a2d-b5bc-8f8437576004" />
-
-<img width="3213" height="1333" alt="image" src="https://github.com/user-attachments/assets/0369b939-def9-460f-833a-5952f3672040" />
-
-<img width="1585" height="983" alt="image" src="https://github.com/user-attachments/assets/120d9023-2941-4765-829c-db9214a66c8c" />
 
 Contact:
 --
