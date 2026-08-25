@@ -1,58 +1,69 @@
-Modmanagee with integrated management for mod-fixes and gamebanana, arca.live and nextcloud downloads
+Modmanagee for XXMI with integrated management for mod-fixes and gamebanana, arca.live and nextcloud downloads
+<img width="3212" height="1344" alt="image" src="https://github.com/user-attachments/assets/49bd5f3d-fad5-4f7c-bf9d-cc0c0411dd11" />
 
 Features:
 --
--One Click enable/disable
+- One Click enable/disable (optional)
 
--Toggle Key editor per mod
+- Toggle Key editor for mods
 
--Mod downloads of gamebanana with auto preview download
+- Mod downloads of gamebanana with auto preview download (via Modbrowser Tab)
 
--Mod-Fix managment / use 
+- Mod-Fix managment / use 
 
--Downloading RabbitFx/TexFx and Orfix(API)[later is for gimi not xxmi]
+- Downloading RabbitFx/TexFx and Orfix(API)[later is for gimi not xxmi]
 
--Drag and drop to add mods
+- Drag and drop to add mods
 
--toggle choice save (globalpersist) and rename funktion
+- toggle choice save (globalpersist) and rename funktion
 
--Integration for Nextcloud downloading incase you host your own cloud (uses public share links) 
+- Integration for Nextcloud downloading incase you host your own cloud (uses public share links) 
 
--Creation of a folder structure inside of the mod folder
+- Creation of a folder structure inside of the mod folder
 
--in app support for discord (still in development)
+- in app support for discord (still in development)
 
--site support for gamebanana, arca live and nextcloud or google drive [hopefully]
+- site support for gamebanana, arca live and nextcloud or google drive [hopefully]
 
-Setup Stuff:
+Usefull infos:
 --
--links for nextcloud/googledrive need to be added via settings
+- links for nextcloud/googledrive need to be added via settings
+
+- fixes have two options to be used. Run which will launch the fix in the choosen path for fixes like the facefix and launch for fixes like moonholders wuwa fixer which lets you choose a path in the app itself so it will be launched from the source folder
+
+- You can disable the downloading of the fixes by ticking <img width="494" height="33" alt="image" src="https://github.com/user-attachments/assets/6a9df9f5-3bd0-4155-a470-cf8cfa74dc73" /> 
+  if you only want to use your own or don't want to use the feature at all.
+
+- You can show / hide tabs to clear up the navigation bar
+
+- you can add mods either by drag and drop or by clicking the yellow / orange button in the modding sites and cloud tab. The button lets you choose a zip, rar etc, destination and a preview image (You can skip this by clicking cancel). After Installing it will delete the rar. Drag and drop works for unzipped folders only right now.
+
 
 
 Included Fixes:
 --
--Swap key saver all games
+- Swap key saver all games
 
--Genshin Fixes (5.7, Orfix, Facefix)
+- Genshin Fixes (5.7, Orfix, Facefix)
 
--Star Rail Fixes (All Fixes from 3.0 to 4.2, Pipeline Converter(, Intel 3.7 Fix will be added))
+- Star Rail Fixes (All Fixes from 3.0 to 4.2, Pipeline Converter(, Intel 3.7 Fix will be added))
 
--Wuwa Fixer (Moonholder Fix, RabbitFx)
+- Wuwa Fixer (Moonholder Fix, RabbitFx), Woju Fixer for 3.5
 
--ZZZ Fixes
+- ZZZ Fixes up to 3.0
 
 
 Supported Games:
 --
--Genshin Impact
+- Genshin Impact
 
--Honkai Star Rail
+- Honkai Star Rail
 
--Wuthering Waves
+- Wuthering Waves
  
--Zenless Zone Zero
+- Zenless Zone Zero
 
--Arknights Endfield
+- Arknights Endfield
 
 Screenshoots:
 --
@@ -71,6 +82,14 @@ Screenshoots:
 <img width="3213" height="1333" alt="image" src="https://github.com/user-attachments/assets/0369b939-def9-460f-833a-5952f3672040" />
 
 <img width="1585" height="983" alt="image" src="https://github.com/user-attachments/assets/120d9023-2941-4765-829c-db9214a66c8c" />
+
+<img width="675" height="399" alt="image" src="https://github.com/user-attachments/assets/7c6cfb83-d429-4252-b804-5c8c8c41d502" />
+
+
+Dev Options
+--
+<img width="586" height="169" alt="image" src="https://github.com/user-attachments/assets/fe17efe3-6328-4e04-8d9d-b5c6f538bcda" />
+
 
 Contact:
 --
