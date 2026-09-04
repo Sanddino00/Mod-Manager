@@ -522,6 +522,16 @@ function App() {
   const [managerCharacterView, setManagerCharacterView] = useState<"grid" | "workspace">("grid");
   const [downloadRecords, setDownloadRecords] = useState<DownloadRecord[]>([]);
   const [lastDownloadFolder, setLastDownloadFolder] = useState<string | null>(null);
+
+  useEffect(() => {
+    void invoke<DownloadRecord[]>("load_download_log")
+      .then((entries) => {
+        if (entries.length) {
+          setDownloadRecords(entries.slice().reverse());
+        }
+      })
+      .catch(() => {});
+  }, []);
   const [devBackgroundPath, setDevBackgroundPath] = useState<string | null>(null);
   const [devBackgroundDataUrl, setDevBackgroundDataUrl] = useState<string | null>(null);
   const [devIconStatus, setDevIconStatus] = useState<string | null>(null);
@@ -2318,12 +2328,13 @@ function App() {
 
     setDownloadRecords((current) => {
       let found = false;
+      let finalRecord: DownloadRecord | null = null;
       const next = current.map((entry) => {
         if (entry.id !== payload.id) {
           return entry;
         }
         found = true;
-        return {
+        finalRecord = {
           ...entry,
           source: entry.source ?? source,
           status: resolvedStatus,
@@ -2333,14 +2344,11 @@ function App() {
           message: payload.message,
           finishedAt: Date.now(),
         };
+        return finalRecord;
       });
 
-      if (found) {
-        return next;
-      }
-
-      return [
-        {
+      if (!found) {
+        finalRecord = {
           id: payload.id,
           source,
           status: resolvedStatus,
@@ -2352,10 +2360,23 @@ function App() {
           message: payload.message,
           startedAt: Date.now(),
           finishedAt: Date.now(),
-        },
-        ...next,
-      ];
+        };
+      }
+
+      if (finalRecord) {
+        void persistDownloadLogEntry(finalRecord);
+      }
+
+      return found ? next : [finalRecord as DownloadRecord, ...next];
     });
+  }
+
+  async function persistDownloadLogEntry(record: DownloadRecord): Promise<void> {
+    try {
+      await invoke("append_download_log_entry", { entry: record });
+    } catch {
+      // Best-effort persistence; failing to log a download history entry isn't fatal.
+    }
   }
 
   function renderGameCard(gameId: GameKey) {

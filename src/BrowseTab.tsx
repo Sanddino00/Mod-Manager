@@ -52,7 +52,17 @@ export interface DownloadEventPayload {
 
 const GB_BASE = "https://gamebanana.com/apiv11";
 
+// Tries the embedded GameBanana webview's own fetch first (carries real login cookies and
+// looks like normal browser traffic), falling back to a plain unauthenticated fetch if that
+// webview isn't open yet (e.g. the user hasn't visited Modding Sides -> GameBanana this session).
 async function gbFetch(endpoint: string): Promise<unknown> {
+  try {
+    const body = await invoke<string>("gamebanana_api_request_via_webview", { endpoint });
+    return JSON.parse(body) as unknown;
+  } catch {
+    // Fall through to a plain fetch below.
+  }
+
   const resp = await fetch(`${GB_BASE}/${endpoint}`, {
     headers: { Accept: "application/json" },
   });
@@ -495,7 +505,12 @@ export function BrowseTab({ game, gameModRoot, onDownloadEvent, onGameSelect }: 
       {/* Center: mod cards */}
       <section className="rounded-[28px] border border-white/10 bg-slate-950/50 p-5">
         <div className="mb-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-slate-300">
-          GameBanana API view: some logged-in-only or age-gated website results may not appear here.
+          <p>
+            GameBanana API view: age-gated/NSFW mods are hidden until you log in. Log into GameBanana (and enable
+            "Show Mature Content" in your account settings) in the{" "}
+            <span className="text-cyan-200">Modding Sides → GameBanana</span> tab — it stays open in the background,
+            so this tab automatically uses that login to unlock them here.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <input

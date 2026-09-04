@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import { Webview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import clsx from "clsx";
@@ -13,7 +13,10 @@ import type { DownloadEventPayload } from "./BrowseTab";
 type ChannelMode = "normal" | "r18";
 
 const ARCA_WEBVIEW_LABEL = "arca-browser-view";
-const ARCA_DOWNLOAD_EVENT = "mod-manager-web-download-request";
+
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 type DownloadInstallResult = {
   installed_path: string;
@@ -21,10 +24,12 @@ type DownloadInstallResult = {
   preview_path: string | null;
 };
 
-type WebDownloadRequestPayload = {
-  source: "gb" | "arca";
+type NativeDownloadEventPayload = {
+  source: "discord" | "arca";
   url: string;
-  fileName?: string;
+  fileName?: string | null;
+  path?: string | null;
+  success?: boolean;
 };
 
 interface Props {
@@ -91,10 +96,6 @@ function buildPasswordHints(game: ArcaGameKey): string[] {
   ];
 }
 
-function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 function deriveNameFromUrl(url: string, fallback = "download"): string {
   try {
     const parsed = new URL(url);
@@ -109,15 +110,14 @@ function deriveModName(fileName: string): string {
   return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
 }
 
-function isLikelyDownloadUrl(url: string): boolean {
-  return /\/dl\/|download|attachment/i.test(url) || /\.(zip|7z|rar|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
-}
-
+// Arca is embedded like a real browser tab (like the GameBanana tab), so normal in-site
+// navigation and links work. Downloads are captured natively into the managed folder; any
+// second-tab/cloud-storage link is handed off to the user's real default browser (needed for
+// its own login/session).
 export function ArcaTab({
   gameModRoot,
   rememberWebSessions = true,
   enableLoginHelperHints = true,
-  enableAdBlocker = true,
   savedUsername = "",
   savedPassword = "",
   onDownloadEvent,
@@ -185,70 +185,6 @@ export function ArcaTab({
 
     return Array.isArray(picked) ? picked[0] ?? null : picked;
   }, [downloadsFolder]);
-
-  const handleManagedDownload = useCallback(
-    async (url: string, preferredName?: string) => {
-      if (!url || !isLikelyDownloadUrl(url)) {
-        return;
-      }
-
-      const fileName = (preferredName?.trim() || deriveNameFromUrl(url, "download")).trim();
-      const modName = deriveModName(fileName);
-      const destination = await pickInstallDestination();
-      if (!destination) {
-        return;
-      }
-      const previewImage = await pickOptionalPreviewImage();
-
-      const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      onDownloadEvent?.({
-        kind: "start",
-        source: "arca",
-        id: requestId,
-        modName,
-        fileName,
-        destinationPath: destination,
-      });
-
-      setDownloading(true);
-      setDownloadError(null);
-
-      try {
-        const result = await invoke<DownloadInstallResult>("download_and_install_mod", {
-          url,
-          destItemPath: destination,
-          modName,
-          previewUrl: previewImage,
-        });
-
-        onDownloadEvent?.({
-          kind: "success",
-          source: "arca",
-          id: requestId,
-          modName,
-          fileName,
-          destinationPath: result.destination_path,
-          installedPath: result.installed_path,
-          previewPath: result.preview_path,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setDownloadError(message);
-        onDownloadEvent?.({
-          kind: "error",
-          source: "arca",
-          id: requestId,
-          modName,
-          fileName,
-          destinationPath: destination,
-          message,
-        });
-      } finally {
-        setDownloading(false);
-      }
-    },
-    [onDownloadEvent, pickInstallDestination, pickOptionalPreviewImage],
-  );
 
   useEffect(() => {
     setAddressInput(activeArcaUrl);
@@ -394,19 +330,9 @@ export function ArcaTab({
       setWebviewReady(false);
       setNativeError(null);
 
-      let existing = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
-      if (!rememberWebSessions && existing) {
-        await existing.close().catch(() => {});
-        existing = null;
-      }
-
+      const existing = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
       if (disposed) {
         return;
-      }
-
-      if (existing) {
-        webviewRef.current = existing;
-        setWebviewReady(true);
       }
 
       const rect = host.getBoundingClientRect();
@@ -415,36 +341,44 @@ export function ArcaTab({
       const x = Math.max(0, Math.round(rect.left));
       const y = Math.max(0, Math.round(rect.top));
 
-      const webview = existing
-        ?? new Webview(getCurrentWindow(), ARCA_WEBVIEW_LABEL, {
-          url: browserUrl,
-          x,
-          y,
-          width,
-          height,
-          focus: false,
-          dataDirectory: rememberWebSessions ? "arca-profile" : sessionProfileId,
-        });
+      let webview = existing;
+
+      if (!webview) {
+        try {
+          await invoke("create_managed_browser_webview", {
+            windowLabel: "main",
+            label: ARCA_WEBVIEW_LABEL,
+            url: browserUrl,
+            source: "arca",
+            downloadsFolder,
+            dataDirectory: rememberWebSessions ? "arca-profile" : sessionProfileId,
+            x,
+            y,
+            width,
+            height,
+          });
+        } catch (err) {
+          if (!disposed) {
+            setWebviewReady(false);
+            setNativeError(err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
+
+        if (disposed) {
+          return;
+        }
+
+        webview = await Webview.getByLabel(ARCA_WEBVIEW_LABEL).catch(() => null);
+      }
+
+      if (disposed || !webview) {
+        return;
+      }
 
       webviewRef.current = webview;
-
-      if (!existing) {
-        void webview.once("tauri://created", () => {
-          if (disposed) {
-            return;
-          }
-          setWebviewReady(true);
-          void syncWebviewBounds(webview).catch(() => {});
-        });
-
-        void webview.once("tauri://error", (event) => {
-          if (disposed) {
-            return;
-          }
-          setWebviewReady(false);
-          setNativeError(String(event.payload));
-        });
-      }
+      setWebviewReady(true);
+      void syncWebviewBounds(webview).catch(() => {});
 
       const sync = () => {
         if (!disposed && webviewRef.current) {
@@ -494,23 +428,17 @@ export function ArcaTab({
         if (cleanup) {
           cleanup();
         }
-        if (rememberWebSessions) {
-          void Promise.all([
-            current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
-            current.setSize(new LogicalSize(1, 1)).catch(() => {}),
-          ]).catch(() => {});
-        } else {
-          void current.close().catch(() => {});
-        }
+        // Always close on unmount instead of hiding off-screen: leaving it "hidden" could
+        // still bleed through as a stray strip when switching tabs. The persistent profile
+        // folder (dataDirectory) keeps the login session even after the webview is closed.
+        void current.close().catch(() => {});
       }
 
-      if (!rememberWebSessions) {
-        void Webview.getByLabel(ARCA_WEBVIEW_LABEL)
-          .then((view) => view?.close().catch(() => {}))
-          .catch(() => {});
-      }
+      void Webview.getByLabel(ARCA_WEBVIEW_LABEL)
+        .then((view) => view?.close().catch(() => {}))
+        .catch(() => {});
     };
-  }, [canUseNativeWebview, rememberWebSessions, sessionProfileId, syncWebviewBounds]);
+  }, [browserUrl, canUseNativeWebview, downloadsFolder, rememberWebSessions, sessionProfileId, syncWebviewBounds]);
 
   useEffect(() => {
     if (!canUseNativeWebview || !webviewRef.current) {
@@ -535,335 +463,83 @@ export function ArcaTab({
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | null = null;
+    let unlistenStarted: (() => void) | null = null;
+    let unlistenFinished: (() => void) | null = null;
 
-    void listen<WebDownloadRequestPayload>(ARCA_DOWNLOAD_EVENT, (event) => {
-      if (disposed) {
+    void listen<NativeDownloadEventPayload>("mod-manager-web-download-started", (event) => {
+      if (disposed || event.payload.source !== "arca") {
         return;
       }
-      const payload = event.payload;
-      if (!payload || payload.source !== "arca") {
-        return;
-      }
-      if (!payload.url) {
-        return;
-      }
-      void handleManagedDownload(payload.url, payload.fileName);
+      const fileName = event.payload.fileName || deriveNameFromUrl(event.payload.url, "download");
+      setDownloading(true);
+      setDownloadError(null);
+      setLocalInstallStatus(null);
+      onDownloadEvent?.({
+        kind: "start",
+        source: "arca",
+        id: `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        modName: deriveModName(fileName),
+        fileName,
+        destinationPath: downloadsFolder,
+      });
     }).then((fn) => {
       if (disposed) {
         void fn();
         return;
       }
-      unlisten = fn;
+      unlistenStarted = fn;
+    });
+
+    void listen<NativeDownloadEventPayload>("mod-manager-web-download-finished", (event) => {
+      if (disposed || event.payload.source !== "arca") {
+        return;
+      }
+      const fileName = event.payload.fileName || deriveNameFromUrl(event.payload.url, "download");
+      const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      setDownloading(false);
+
+      if (event.payload.success && event.payload.path) {
+        setLocalInstallStatus(`Downloaded ${fileName} to ${downloadsFolder}.`);
+        onDownloadEvent?.({
+          kind: "success",
+          source: "arca",
+          id: requestId,
+          modName: deriveModName(fileName),
+          fileName,
+          destinationPath: downloadsFolder,
+          installedPath: event.payload.path,
+          previewPath: null,
+        });
+      } else {
+        setDownloadError(`Download failed for ${fileName}.`);
+        onDownloadEvent?.({
+          kind: "error",
+          source: "arca",
+          id: requestId,
+          modName: deriveModName(fileName),
+          fileName,
+          destinationPath: downloadsFolder,
+          message: "Download failed.",
+        });
+      }
+    }).then((fn) => {
+      if (disposed) {
+        void fn();
+        return;
+      }
+      unlistenFinished = fn;
     });
 
     return () => {
       disposed = true;
-      if (unlisten) {
-        void unlisten();
+      if (unlistenStarted) {
+        void unlistenStarted();
+      }
+      if (unlistenFinished) {
+        void unlistenFinished();
       }
     };
-  }, [handleManagedDownload]);
-
-  useEffect(() => {
-    if (!canUseNativeWebview || !webviewRef.current) {
-      return;
-    }
-
-    const installHookScript = `(() => {
-      try {
-        if ((window).__modManagerArcaDownloadHookInstalled) {
-          return;
-        }
-        (window).__modManagerArcaDownloadHookInstalled = true;
-
-        const isDownloadUrl = (url) => /\\/dl\\/|download|attachment/i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
-        const URL_RE = /https?:\\/\\/[^\\s"'<>]+/i;
-        const toAbsoluteUrl = (value) => {
-          try {
-            return new URL(String(value || ''), window.location.href).href;
-          } catch {
-            return String(value || '');
-          }
-        };
-
-        const emitDownload = (href, fileName) => {
-          if (!href) {
-            return false;
-          }
-          const absolute = toAbsoluteUrl(href);
-          if (!absolute || !isDownloadUrl(absolute)) {
-            return false;
-          }
-          if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
-            void window.__TAURI_INTERNALS__.invoke('emit_web_download_request', {
-              source: 'arca',
-              url: absolute,
-              fileName: (fileName || '').trim(),
-            }).catch(() => {});
-            return true;
-          }
-          return false;
-        };
-
-        const stopEvent = (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (typeof event.stopImmediatePropagation === 'function') {
-            event.stopImmediatePropagation();
-          }
-        };
-
-        const findUrlInNodeText = (node) => {
-          let current = node;
-          for (let depth = 0; depth < 5 && current; depth += 1) {
-            const text = String(current.textContent || '').trim();
-            const match = text.match(URL_RE);
-            if (match && match[0]) {
-              return match[0];
-            }
-            current = current.parentElement || null;
-          }
-          return '';
-        };
-
-        document.addEventListener('click', (event) => {
-          const target = event.target;
-          const anchor = target && target.closest ? target.closest('a[href], area[href]') : null;
-          if (!anchor) {
-            const button = target && target.closest ? target.closest('button, [role="button"]') : null;
-            if (!button) {
-              const textUrl = findUrlInNodeText(target);
-              if (textUrl && /^https?:\/\//i.test(textUrl)) {
-                stopEvent(event);
-                window.location.href = toAbsoluteUrl(textUrl);
-              }
-              return;
-            }
-            const text = (button.textContent || '').trim();
-            const explicitHref = (button.getAttribute && (button.getAttribute('data-href') || button.getAttribute('data-download-url'))) || '';
-            if (emitDownload(explicitHref, text)) {
-              stopEvent(event);
-            }
-            return;
-          }
-          const href = anchor.href || '';
-          const explicitDownload = anchor.hasAttribute('download');
-          if (!href) {
-            return;
-          }
-
-          if (explicitDownload || isDownloadUrl(href)) {
-            stopEvent(event);
-            const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
-            if (!emitDownload(href, fileName)) {
-              window.location.href = toAbsoluteUrl(href);
-            }
-            return;
-          }
-
-          const rawHref = String(anchor.getAttribute('href') || '').trim();
-          if (!rawHref || rawHref === '#' || /^javascript:/i.test(rawHref)) {
-            const hinted =
-              (anchor.getAttribute('data-href') || anchor.getAttribute('data-url') || '').trim()
-              || findUrlInNodeText(anchor);
-            if (hinted) {
-              stopEvent(event);
-              window.location.href = toAbsoluteUrl(hinted);
-            }
-          }
-        }, true);
-
-        document.addEventListener('click', (event) => {
-          const target = event.target;
-          if (!target || !target.closest) {
-            return;
-          }
-          const button = target.closest('button, [role="button"]');
-          if (button) {
-            const text = (button.textContent || '').trim();
-            const explicitHref = (button.getAttribute && (button.getAttribute('data-href') || button.getAttribute('data-download-url'))) || '';
-            if (emitDownload(explicitHref, text)) {
-              stopEvent(event);
-            }
-          }
-        }, true);
-
-        document.addEventListener('submit', (event) => {
-          const form = event.target;
-          if (!form || !form.action) {
-            return;
-          }
-          if (emitDownload(form.action, document.title || 'download')) {
-            stopEvent(event);
-          }
-        }, true);
-
-        const originalOpen = window.open.bind(window);
-        window.open = function(url, target, features) {
-          if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
-            return null;
-          }
-          return originalOpen(url, target, features);
-        };
-
-        const originalAssign = window.location.assign.bind(window.location);
-        window.location.assign = function(url) {
-          if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
-            return;
-          }
-          originalAssign(url);
-        };
-
-        const originalReplace = window.location.replace.bind(window.location);
-        window.location.replace = function(url) {
-          if (typeof url === 'string' && emitDownload(url, document.title || 'download')) {
-            return;
-          }
-          originalReplace(url);
-        };
-
-        (window).__modManagerArcaPollDownloadUrl = () => {
-          const href = window.location.href || '';
-          if (isDownloadUrl(href) && href !== (window).__modManagerLastDlUrl) {
-            (window).__modManagerLastDlUrl = href;
-            emitDownload(href, document.title || 'download');
-          }
-        };
-      } catch {
-        // Ignore script injection failures on restricted pages.
-      }
-    })();`;
-
-    const pollScript = `(() => {
-      try {
-        if (typeof (window).__modManagerArcaPollDownloadUrl === 'function') {
-          (window).__modManagerArcaPollDownloadUrl();
-        }
-      } catch {
-        // Ignore transient polling errors.
-      }
-    })();`;
-
-    const intervalId = window.setInterval(() => {
-      void runWebviewScript(installHookScript).catch(() => {
-        // Ignore transient script errors during navigation.
-      });
-      void runWebviewScript(pollScript).catch(() => {
-        // Ignore transient script errors during navigation.
-      });
-    }, 1200);
-
-    void runWebviewScript(installHookScript).catch(() => {
-      // Ignore transient script errors during navigation.
-    });
-    void runWebviewScript(pollScript).catch(() => {
-      // Ignore transient script errors during navigation.
-    });
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [canUseNativeWebview, runWebviewScript]);
-
-  useEffect(() => {
-    if (!canUseNativeWebview || !webviewRef.current) {
-      return;
-    }
-
-    const adblockScript = `(() => {
-      try {
-        const enabled = ${enableAdBlocker ? "true" : "false"};
-        const STYLE_ID = 'mm-basic-adblock-style';
-        const existingStyle = document.getElementById(STYLE_ID);
-
-        if (!enabled) {
-          if (existingStyle) {
-            existingStyle.remove();
-          }
-          return;
-        }
-
-        let styleEl = existingStyle;
-        if (!styleEl) {
-          styleEl = document.createElement('style');
-          styleEl.id = STYLE_ID;
-          document.documentElement.appendChild(styleEl);
-        }
-
-        styleEl.textContent = '.adsbygoogle,iframe[src*="doubleclick"],iframe[src*="googlesyndication"],[id*="sponsor" i],[class*="sponsor" i],[aria-label*="advert" i],[class*="banner-ad" i],[id^="google_ads"] { display:none !important; visibility:hidden !important; pointer-events:none !important; }';
-
-        if ((window).__mmBasicAdblockInstalled) {
-          return;
-        }
-        (window).__mmBasicAdblockInstalled = true;
-
-        const blockedHosts = ['doubleclick.net', 'googlesyndication.com', 'adservice.google.com', 'googletagmanager.com', 'taboola.com', 'outbrain.com', 'adnxs.com', 'criteo.com'];
-
-        const shouldBlock = (rawUrl) => {
-          try {
-            const parsed = new URL(String(rawUrl || ''), window.location.href);
-            const host = (parsed.hostname || '').toLowerCase();
-            return blockedHosts.some((entry) => host === entry || host.endsWith('.' + entry));
-          } catch {
-            return false;
-          }
-        };
-
-        const originalOpen = window.open ? window.open.bind(window) : null;
-        if (originalOpen) {
-          window.open = function(url, target, features) {
-            if (enabled && shouldBlock(url)) {
-              return null;
-            }
-            return originalOpen(url, target, features);
-          };
-        }
-
-        if (window.fetch) {
-          const originalFetch = window.fetch.bind(window);
-          window.fetch = function(input, init) {
-            const requestUrl = typeof input === 'string' ? input : (input && input.url) || '';
-            if (enabled && shouldBlock(requestUrl)) {
-              return Promise.reject(new Error('Blocked by basic adblock'));
-            }
-            return originalFetch(input, init);
-          };
-        }
-
-        const originalXhrOpen = XMLHttpRequest.prototype.open;
-        const originalXhrSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-          this.__mmAdUrl = url;
-          return originalXhrOpen.call(this, method, url, ...rest);
-        };
-        XMLHttpRequest.prototype.send = function(...args) {
-          if (enabled && shouldBlock(this.__mmAdUrl || '')) {
-            return;
-          }
-          return originalXhrSend.apply(this, args);
-        };
-      } catch {
-        // Ignore adblock injection failures.
-      }
-    })();`;
-
-    const intervalId = window.setInterval(() => {
-      void runWebviewScript(adblockScript).catch(() => {});
-    }, 1600);
-
-    void runWebviewScript(adblockScript).catch(() => {});
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [canUseNativeWebview, enableAdBlocker, runWebviewScript]);
-
-  async function handleOpenExternal(url: string) {
-    await openUrl(url).catch(() => {
-      window.open(url, "_blank", "noopener,noreferrer");
-    });
-  }
+  }, [downloadsFolder, onDownloadEvent]);
 
   function normalizeUrl(input: string): string {
     const trimmed = input.trim();
@@ -883,10 +559,6 @@ export function ArcaTab({
     setNativeError(null);
   }
 
-  function handleReload() {
-    setRefreshNonce((current) => current + 1);
-  }
-
   function handleBack() {
     if (canUseNativeWebview && webviewRef.current) {
       void runWebviewScript("history.back();").catch((err) => {
@@ -894,7 +566,6 @@ export function ArcaTab({
       });
       return;
     }
-
     setRefreshNonce((current) => current + 1);
   }
 
@@ -905,7 +576,6 @@ export function ArcaTab({
       });
       return;
     }
-
     setRefreshNonce((current) => current + 1);
   }
 
@@ -997,7 +667,7 @@ export function ArcaTab({
               <button
                 type="button"
                 onClick={() => {
-                  void handleOpenExternal(addressInput || activeArcaUrl);
+                  void openUrl(addressInput || activeArcaUrl);
                 }}
                 className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/12"
               >
@@ -1114,7 +784,9 @@ export function ArcaTab({
             </button>
             <button
               type="button"
-              onClick={handleReload}
+              onClick={() => {
+                setRefreshNonce((current) => current + 1);
+              }}
               className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/10 px-3 py-2 text-xs text-white transition hover:bg-white/15"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -1150,10 +822,10 @@ export function ArcaTab({
             </p>
           ) : null}
           {downloading ? (
-            <p className="mt-2 text-xs text-cyan-100/90">Installing selected download...</p>
+            <p className="mt-2 text-xs text-cyan-100/90">Downloading...</p>
           ) : null}
           {downloadError ? (
-            <p className="mt-2 text-xs text-rose-200/90">Download install failed: {downloadError}</p>
+            <p className="mt-2 text-xs text-rose-200/90">Download failed: {downloadError}</p>
           ) : null}
           {autofillStatus ? (
             <p className="mt-2 text-xs text-indigo-100/90">{autofillStatus}</p>
@@ -1211,6 +883,19 @@ export function ArcaTab({
               >
                 Open In Panel
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!decodedLink) {
+                    return;
+                  }
+                  void openUrl(normalizeUrl(decodedLink));
+                }}
+                disabled={!decodedLink}
+                className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Open in Browser
+              </button>
             </div>
           </details>
 
@@ -1240,3 +925,4 @@ export function ArcaTab({
     </section>
   );
 }
+

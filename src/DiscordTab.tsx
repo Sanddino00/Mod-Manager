@@ -2,21 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { LogicalPosition, LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import { Webview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Download, ExternalLink, RefreshCw } from "lucide-react";
 import type { DownloadEventPayload } from "./BrowseTab";
 
 const DISCORD_WEBVIEW_LABEL = "discord-browser-view";
-const DISCORD_DOWNLOAD_EVENT = "mod-manager-web-download-request";
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 type Props = {
-  rememberWebSessions: boolean;
+  rememberWebSessions?: boolean;
   gameModRoot: string;
   onDownloadEvent?: (payload: DownloadEventPayload) => void;
 };
@@ -27,10 +26,12 @@ type DownloadInstallResult = {
   preview_path: string | null;
 };
 
-type WebDownloadRequestPayload = {
-  source: "discord";
+type NativeDownloadEventPayload = {
+  source: "discord" | "arca";
   url: string;
-  fileName?: string;
+  fileName?: string | null;
+  path?: string | null;
+  success?: boolean;
 };
 
 function deriveNameFromUrl(url: string, fallback = "download"): string {
@@ -47,28 +48,10 @@ function deriveModName(fileName: string): string {
   return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
 }
 
-function normalizeDiscordDownloadFileName(preferredName: string, url: string): string {
-  const trimmed = preferredName.trim();
-  const lower = trimmed.toLowerCase();
-  const lowQuality = !trimmed
-    || lower === "download"
-    || lower === "weiter zum download"
-    || lower === "download now"
-    || lower.length < 4;
-
-  if (!lowQuality) {
-    return trimmed;
-  }
-
-  const fromUrl = deriveNameFromUrl(url, "").trim();
-  if (fromUrl && fromUrl.toLowerCase() !== "download") {
-    return fromUrl;
-  }
-
-  return `discord_download_${Date.now()}.bin`;
-}
-
-export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }: Props) {
+// Discord is embedded like a real browser tab (via Rust, not the JS Webview API) so its own
+// `on_download` hook can capture attachment downloads into the managed folder. Any second-tab
+// link Discord tries to open is handed off to the user's real default browser instead.
+export function DiscordTab({ rememberWebSessions = true, gameModRoot, onDownloadEvent }: Props) {
   const [browserUrl, setBrowserUrl] = useState("https://discord.com/app");
   const [addressInput, setAddressInput] = useState("https://discord.com/app");
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -76,9 +59,6 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [localInstallStatus, setLocalInstallStatus] = useState<string | null>(null);
-  const [lastCapturedUrl, setLastCapturedUrl] = useState<string | null>(null);
-  const [captureCount, setCaptureCount] = useState(0);
-  const [lastCaptureAt, setLastCaptureAt] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [installingLocalArchive, setInstallingLocalArchive] = useState(false);
   const [downloadsFolder, setDownloadsFolder] = useState<string>("C:/Users/Public/Downloads");
@@ -153,67 +133,6 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
 
     return Array.isArray(picked) ? picked[0] ?? null : picked;
   }, [downloadsFolder]);
-
-  const handleManagedDownload = useCallback(async (url: string, preferredName?: string) => {
-    if (!url) {
-      return;
-    }
-
-    const fileName = normalizeDiscordDownloadFileName(preferredName?.trim() || deriveNameFromUrl(url, "download"), url);
-    const destinationFolder = downloadsFolder.trim() || (await invoke<string>("get_default_downloads_folder").catch(() => ""));
-    if (!destinationFolder) {
-      return;
-    }
-
-    const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    onDownloadEvent?.({
-      kind: "start",
-      source: "discord",
-      id: requestId,
-      modName: deriveModName(fileName),
-      fileName,
-      destinationPath: destinationFolder,
-    });
-
-    setDownloading(true);
-    setDownloadError(null);
-    setLocalInstallStatus(null);
-
-    try {
-      const savedPath = await invoke<string>("download_file_to_folder", {
-        url,
-        destFolder: destinationFolder,
-        fileName,
-      });
-
-      onDownloadEvent?.({
-        kind: "success",
-        source: "discord",
-        id: requestId,
-        modName: deriveModName(fileName),
-        fileName,
-        destinationPath: destinationFolder,
-        installedPath: savedPath,
-        previewPath: null,
-      });
-
-      setLocalInstallStatus(`Downloaded ${fileName} to ${destinationFolder}.`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setDownloadError(message);
-      onDownloadEvent?.({
-        kind: "error",
-        source: "discord",
-        id: requestId,
-        modName: deriveModName(fileName),
-        fileName,
-        destinationPath: destinationFolder,
-        message,
-      });
-    } finally {
-      setDownloading(false);
-    }
-  }, [downloadsFolder, onDownloadEvent]);
 
   const handleInstallDownloadedArchive = useCallback(async () => {
     const picked = await open({
@@ -340,20 +259,10 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
       setWebviewReady(false);
       setNativeError(null);
 
-      let existing = await Webview.getByLabel(DISCORD_WEBVIEW_LABEL).catch(() => null);
-
-      if (!rememberWebSessions && existing) {
-        await existing.close().catch(() => {});
-        existing = null;
-      }
+      const existing = await Webview.getByLabel(DISCORD_WEBVIEW_LABEL).catch(() => null);
 
       if (disposed) {
         return;
-      }
-
-      if (existing) {
-        webviewRef.current = existing;
-        setWebviewReady(true);
       }
 
       const rect = host.getBoundingClientRect();
@@ -362,35 +271,44 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
       const x = Math.max(0, Math.round(rect.left));
       const y = Math.max(0, Math.round(rect.top));
 
-      const webview = existing ?? new Webview(getCurrentWindow(), DISCORD_WEBVIEW_LABEL, {
-        url: browserUrl,
-        x,
-        y,
-        width,
-        height,
-        focus: false,
-        dataDirectory: rememberWebSessions ? "discord-profile" : profileId,
-      });
+      let webview = existing;
+
+      if (!webview) {
+        try {
+          await invoke("create_managed_browser_webview", {
+            windowLabel: "main",
+            label: DISCORD_WEBVIEW_LABEL,
+            url: browserUrl,
+            source: "discord",
+            downloadsFolder,
+            dataDirectory: rememberWebSessions ? "discord-profile" : profileId,
+            x,
+            y,
+            width,
+            height,
+          });
+        } catch (err) {
+          if (!disposed) {
+            setWebviewReady(false);
+            setNativeError(err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
+
+        if (disposed) {
+          return;
+        }
+
+        webview = await Webview.getByLabel(DISCORD_WEBVIEW_LABEL).catch(() => null);
+      }
+
+      if (disposed || !webview) {
+        return;
+      }
 
       webviewRef.current = webview;
-
-      if (!existing) {
-        void webview.once("tauri://created", () => {
-          if (disposed) {
-            return;
-          }
-          setWebviewReady(true);
-          void syncWebviewBounds(webview).catch(() => {});
-        });
-
-        void webview.once("tauri://error", (event) => {
-          if (disposed) {
-            return;
-          }
-          setWebviewReady(false);
-          setNativeError(String(event.payload));
-        });
-      }
+      setWebviewReady(true);
+      void syncWebviewBounds(webview).catch(() => {});
 
       const sync = () => {
         if (!disposed && webviewRef.current) {
@@ -440,24 +358,17 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
         if (cleanup) {
           cleanup();
         }
-
-        if (rememberWebSessions) {
-          void Promise.all([
-            current.setPosition(new LogicalPosition(-10000, -10000)).catch(() => {}),
-            current.setSize(new LogicalSize(1, 1)).catch(() => {}),
-          ]).catch(() => {});
-        } else {
-          void current.close().catch(() => {});
-        }
+        // Always close on unmount instead of hiding off-screen: leaving it "hidden" could
+        // still bleed through as a stray strip when switching tabs. The persistent profile
+        // folder (dataDirectory) keeps the login session even after the webview is closed.
+        void current.close().catch(() => {});
       }
 
-      if (!rememberWebSessions) {
-        void Webview.getByLabel(DISCORD_WEBVIEW_LABEL)
-          .then((view) => view?.close().catch(() => {}))
-          .catch(() => {});
-      }
+      void Webview.getByLabel(DISCORD_WEBVIEW_LABEL)
+        .then((view) => view?.close().catch(() => {}))
+        .catch(() => {});
     };
-  }, [browserUrl, canUseNativeWebview, profileId, rememberWebSessions, syncWebviewBounds]);
+  }, [browserUrl, canUseNativeWebview, downloadsFolder, profileId, rememberWebSessions, syncWebviewBounds]);
 
   useEffect(() => {
     if (!canUseNativeWebview || !webviewRef.current) {
@@ -465,8 +376,7 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
     }
 
     const escaped = JSON.stringify(browserUrl);
-    const script = `window.location.href = ${escaped};`;
-    void runWebviewScript(script).catch((err) => {
+    void runWebviewScript(`window.location.href = ${escaped};`).catch((err) => {
       setNativeError(err instanceof Error ? err.message : String(err));
     });
   }, [browserUrl, canUseNativeWebview, runWebviewScript]);
@@ -483,422 +393,83 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | null = null;
+    let unlistenStarted: (() => void) | null = null;
+    let unlistenFinished: (() => void) | null = null;
 
-    void listen<WebDownloadRequestPayload>(DISCORD_DOWNLOAD_EVENT, (event) => {
-      if (disposed) {
+    void listen<NativeDownloadEventPayload>("mod-manager-web-download-started", (event) => {
+      if (disposed || event.payload.source !== "discord") {
         return;
       }
-
-      const payload = event.payload;
-      if (!payload || payload.source !== "discord" || !payload.url) {
-        return;
-      }
-
-      setLastCapturedUrl(payload.url);
-      setCaptureCount((current) => current + 1);
-      setLastCaptureAt(Date.now());
-
-      void handleManagedDownload(payload.url, payload.fileName);
+      const fileName = event.payload.fileName || deriveNameFromUrl(event.payload.url, "download");
+      setDownloading(true);
+      setDownloadError(null);
+      setLocalInstallStatus(null);
+      onDownloadEvent?.({
+        kind: "start",
+        source: "discord",
+        id: `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        modName: deriveModName(fileName),
+        fileName,
+        destinationPath: downloadsFolder,
+      });
     }).then((fn) => {
       if (disposed) {
         void fn();
         return;
       }
-      unlisten = fn;
+      unlistenStarted = fn;
+    });
+
+    void listen<NativeDownloadEventPayload>("mod-manager-web-download-finished", (event) => {
+      if (disposed || event.payload.source !== "discord") {
+        return;
+      }
+      const fileName = event.payload.fileName || deriveNameFromUrl(event.payload.url, "download");
+      const requestId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      setDownloading(false);
+
+      if (event.payload.success && event.payload.path) {
+        setLocalInstallStatus(`Downloaded ${fileName} to ${downloadsFolder}.`);
+        onDownloadEvent?.({
+          kind: "success",
+          source: "discord",
+          id: requestId,
+          modName: deriveModName(fileName),
+          fileName,
+          destinationPath: downloadsFolder,
+          installedPath: event.payload.path,
+          previewPath: null,
+        });
+      } else {
+        setDownloadError(`Download failed for ${fileName}.`);
+        onDownloadEvent?.({
+          kind: "error",
+          source: "discord",
+          id: requestId,
+          modName: deriveModName(fileName),
+          fileName,
+          destinationPath: downloadsFolder,
+          message: "Download failed.",
+        });
+      }
+    }).then((fn) => {
+      if (disposed) {
+        void fn();
+        return;
+      }
+      unlistenFinished = fn;
     });
 
     return () => {
       disposed = true;
-      if (unlisten) {
-        void unlisten();
+      if (unlistenStarted) {
+        void unlistenStarted();
+      }
+      if (unlistenFinished) {
+        void unlistenFinished();
       }
     };
-  }, [handleManagedDownload]);
-
-  useEffect(() => {
-    if (!canUseNativeWebview || !webviewRef.current) {
-      return;
-    }
-
-    const installHookScript = `(() => {
-      try {
-        const HOOK_VERSION = 4;
-        if ((window).__modManagerDiscordDownloadHookVersion === HOOK_VERSION) {
-          return;
-        }
-        (window).__modManagerDiscordDownloadHookVersion = HOOK_VERSION;
-        (window).__modManagerDiscordDownloadHookInstalled = true;
-
-        const ARCHIVE_EXT_RE = /\\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i;
-        const isDownloadUrl = (url) => /discordapp\\.com\\/attachments|cdn\\.discordapp\\.com\\/attachments|media\\.discordapp\\.net\\/attachments|cdn\\.discordapp\\.net\\/attachments|discordsays\\.com|\\bdownload\\b|attachment|\\/files\\//i.test(url) || ARCHIVE_EXT_RE.test(url);
-        const isLikelyAttachmentName = (value) => {
-          const lower = String(value || '').toLowerCase();
-          if (!lower) {
-            return false;
-          }
-          return /(\\.zip|\\.7z|\\.rar|\\.pak|\\.exe|\\.dll|\\.txt|\\.msi)\\b/.test(lower)
-            || /download|herunterladen|attachment|datei/i.test(lower);
-        };
-        const URL_RE = /https?:\\/\\/[^\\s"'<>]+/i;
-        const getEventNode = (event) => {
-          if (event && typeof event.composedPath === 'function') {
-            const path = event.composedPath();
-            for (const node of path) {
-              if (node && typeof node.closest === 'function') {
-                return node;
-              }
-            }
-          }
-          return event ? event.target : null;
-        };
-        const toAbsoluteUrl = (value) => {
-          try {
-            return new URL(String(value || ''), window.location.href).href;
-          } catch {
-            return String(value || '');
-          }
-        };
-
-        const emitDownload = (href, fileName, allowAny = false) => {
-          if (!href) {
-            return false;
-          }
-          const absolute = toAbsoluteUrl(href);
-          if (!absolute || (!allowAny && !isDownloadUrl(absolute))) {
-            return false;
-          }
-          const invokeFn =
-            (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function' && window.__TAURI_INTERNALS__.invoke)
-            || (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === 'function' && window.__TAURI__.core.invoke)
-            || (window.__TAURI__ && typeof window.__TAURI__.invoke === 'function' && window.__TAURI__.invoke)
-            || null;
-          if (invokeFn) {
-            void invokeFn('emit_web_download_request', {
-              source: 'discord',
-              url: absolute,
-              fileName: (fileName || '').trim(),
-            }).catch(() => {});
-            return true;
-          }
-          return false;
-        };
-
-        const findNearbyAttachmentUrl = (node) => {
-          let current = node;
-          for (let depth = 0; depth < 6 && current; depth += 1) {
-            if (current && typeof current.querySelectorAll === 'function') {
-              const anchors = current.querySelectorAll('a[href], area[href]');
-              for (const anchor of anchors) {
-                const href = anchor.getAttribute('href') || anchor.href || '';
-                const text = String(anchor.textContent || '').trim();
-                if (href && (isDownloadUrl(href) || isLikelyAttachmentName(text))) {
-                  return href;
-                }
-              }
-            }
-            current = current.parentElement || null;
-          }
-
-          if (document && typeof document.querySelectorAll === 'function') {
-            const globalAnchors = document.querySelectorAll('a[href], area[href]');
-            for (const anchor of globalAnchors) {
-              const href = anchor.getAttribute('href') || anchor.href || '';
-              const text = String(anchor.textContent || '').trim();
-              if (href && (isDownloadUrl(href) || isLikelyAttachmentName(text))) {
-                return href;
-              }
-            }
-          }
-
-          return '';
-        };
-
-        const findUrlInNodeText = (node) => {
-          let current = node;
-          for (let depth = 0; depth < 5 && current; depth += 1) {
-            const text = String(current.textContent || '').trim();
-            const match = text.match(URL_RE);
-            if (match && match[0]) {
-              return match[0];
-            }
-            current = current.parentElement || null;
-          }
-          return '';
-        };
-
-        const probeDownloadUrl = () => {
-          const fromLocation = window.location.href || '';
-          if (fromLocation && isDownloadUrl(fromLocation)) {
-            return fromLocation;
-          }
-
-          const selectors = [
-            'a[href]',
-            'area[href]',
-            '[data-href]',
-            '[data-url]',
-          ];
-          for (const selector of selectors) {
-            const nodes = document.querySelectorAll(selector);
-            for (const node of nodes) {
-              const href =
-                (node.getAttribute && (node.getAttribute('href') || node.getAttribute('data-href') || node.getAttribute('data-url'))) ||
-                '';
-              const text = String(node.textContent || '').trim();
-              if (href && (isDownloadUrl(href) || isLikelyAttachmentName(text))) {
-                return href;
-              }
-            }
-          }
-
-          return '';
-        };
-
-        const scheduleDownloadProbe = (label) => {
-          let tries = 0;
-          const timer = window.setInterval(() => {
-            tries += 1;
-            try {
-              const candidate = probeDownloadUrl();
-              if (candidate) {
-                emitDownload(candidate, label || document.title || 'download', true);
-                window.clearInterval(timer);
-                return;
-              }
-            } catch {
-              // Ignore transient probe failures.
-            }
-
-            if (tries >= 24) {
-              window.clearInterval(timer);
-            }
-          }, 250);
-        };
-
-        const wrapPopupWindow = (popup, label) => {
-          if (!popup || popup.__modManagerPopupWrapped) {
-            return popup;
-          }
-
-          try {
-            popup.__modManagerPopupWrapped = true;
-          } catch {
-            // Ignore marker write failures on restricted popup objects.
-          }
-
-          let lastHref = '';
-          const monitorId = window.setInterval(() => {
-            try {
-              if (!popup || popup.closed) {
-                window.clearInterval(monitorId);
-                return;
-              }
-
-              const href = String((popup.location && popup.location.href) || '');
-              if (href && href !== lastHref) {
-                lastHref = href;
-                emitDownload(href, label, true);
-              }
-            } catch {
-              // Cross-origin popups can throw; keep polling until closed.
-            }
-          }, 200);
-
-          const proxy = new Proxy(popup, {
-            get(target, prop, receiver) {
-              if (prop === 'location') {
-                try {
-                  const loc = target.location;
-                  return new Proxy(loc, {
-                    get(locTarget, locProp, locReceiver) {
-                      if (locProp === 'assign' || locProp === 'replace') {
-                        return (nextValue) => {
-                          emitDownload(String(nextValue || ''), label, true);
-                          return locTarget[locProp].call(locTarget, nextValue);
-                        };
-                      }
-                      return Reflect.get(locTarget, locProp, locReceiver);
-                    },
-                    set(locTarget, locProp, nextValue) {
-                      if ((locProp === 'href' || locProp === 'pathname' || locProp === 'search' || locProp === 'hash') && typeof nextValue === 'string') {
-                        emitDownload(nextValue, label, true);
-                      }
-                      return Reflect.set(locTarget, locProp, nextValue);
-                    },
-                  });
-                } catch {
-                  return Reflect.get(target, prop, receiver);
-                }
-              }
-
-              return Reflect.get(target, prop, receiver);
-            },
-            set(target, prop, value, receiver) {
-              if (prop === 'location') {
-                emitDownload(String(value || ''), label, true);
-              }
-              return Reflect.set(target, prop, value, receiver);
-            },
-          });
-
-          return proxy;
-        };
-
-        document.addEventListener('click', (event) => {
-          const target = getEventNode(event);
-          const anchor = target && target.closest ? target.closest('a[href], area[href]') : null;
-          if (!anchor) {
-            return;
-          }
-
-          const href = anchor.href || '';
-          const explicitDownload = anchor.hasAttribute('download');
-          if (!href) {
-            return;
-          }
-
-          if (explicitDownload || isDownloadUrl(href) || isLikelyAttachmentName(anchor.textContent || '')) {
-            const fileName = (anchor.getAttribute('download') || anchor.textContent || '').trim();
-            emitDownload(href, fileName || document.title || 'download', true);
-          }
-
-          const textUrl = findUrlInNodeText(anchor);
-          if (textUrl && textUrl !== href) {
-            emitDownload(textUrl, document.title || 'download', true);
-          }
-        }, true);
-
-        document.addEventListener('click', (event) => {
-          const target = getEventNode(event);
-          if (!target || !target.closest) {
-            return;
-          }
-
-          let handledButtonAction = false;
-          const button = target.closest('button, [role="button"]');
-          if (button) {
-            const label = String(button.textContent || button.getAttribute('aria-label') || '').toLowerCase();
-            if (/download|herunterladen/.test(label)) {
-              handledButtonAction = true;
-              emitDownload(window.location.href || '', button.textContent || document.title || 'download', true);
-              scheduleDownloadProbe(button.textContent || document.title || 'download');
-
-              const directHref =
-                (button.getAttribute && (button.getAttribute('data-href') || button.getAttribute('href') || button.getAttribute('data-url'))) || '';
-              const found = directHref || findNearbyAttachmentUrl(button);
-              const fromText = findUrlInNodeText(button);
-              const finalUrl = found || fromText || window.location.href || '';
-              if (finalUrl) {
-                emitDownload(finalUrl, button.textContent || document.title || 'download', true);
-              }
-            }
-
-            if (/weiter zum download/.test(label)) {
-              handledButtonAction = true;
-              emitDownload(window.location.href || '', button.textContent || document.title || 'download', true);
-              scheduleDownloadProbe(button.textContent || document.title || 'download');
-
-              const found = findNearbyAttachmentUrl(button) || window.location.href || '';
-              if (found) {
-                emitDownload(found, button.textContent || document.title || 'download', true);
-              }
-
-              window.setTimeout(() => {
-                try {
-                  const nextHref = window.location.href || '';
-                  if (nextHref) {
-                    emitDownload(nextHref, document.title || 'download', true);
-                  }
-                } catch {
-                  // Ignore post-confirm URL probe failures.
-                }
-              }, 180);
-            }
-          }
-
-          if (handledButtonAction) {
-            return;
-          }
-
-          const textUrl = findUrlInNodeText(target);
-          if (textUrl && !isDownloadUrl(textUrl)) {
-            emitDownload(textUrl, document.title || 'download', true);
-          }
-        }, true);
-
-        const originalOpen = window.open ? window.open.bind(window) : null;
-        if (originalOpen) {
-          window.open = function(url, target, features) {
-            const label = document.title || 'download';
-            if (typeof url === 'string' && url) {
-              emitDownload(url, label, true);
-            }
-
-            const popup = originalOpen(url, target, features);
-            if (popup) {
-              return wrapPopupWindow(popup, label);
-            }
-
-            return popup;
-          };
-        }
-
-        const originalFetch = window.fetch ? window.fetch.bind(window) : null;
-        if (originalFetch) {
-          window.fetch = function(input, init) {
-            const requestUrl = typeof input === 'string' ? input : (input && input.url) || '';
-            emitDownload(requestUrl, document.title || 'download');
-            return originalFetch(input, init);
-          };
-        }
-
-        const originalXhrOpen = XMLHttpRequest.prototype.open;
-        const originalXhrSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-          this.__mmDownloadUrl = toAbsoluteUrl(url);
-          return originalXhrOpen.call(this, method, url, ...rest);
-        };
-        XMLHttpRequest.prototype.send = function(...args) {
-          const href = this.__mmDownloadUrl || '';
-          emitDownload(href, document.title || 'download');
-          return originalXhrSend.apply(this, args);
-        };
-
-        (window).__modManagerDiscordPollDownloadUrl = () => {
-          const href = window.location.href || '';
-          if (isDownloadUrl(href) && href !== (window).__modManagerLastDlUrl) {
-            (window).__modManagerLastDlUrl = href;
-            emitDownload(href, document.title || 'download');
-          }
-        };
-      } catch {
-        // Ignore script injection failures on restricted pages.
-      }
-    })();`;
-
-    const pollScript = `(() => {
-      try {
-        if (typeof (window).__modManagerDiscordPollDownloadUrl === 'function') {
-          (window).__modManagerDiscordPollDownloadUrl();
-        }
-      } catch {
-        // Ignore transient polling errors.
-      }
-    })();`;
-
-    const intervalId = window.setInterval(() => {
-      void runWebviewScript(installHookScript).catch(() => {});
-      void runWebviewScript(pollScript).catch(() => {});
-    }, 1200);
-
-    void runWebviewScript(installHookScript).catch(() => {});
-    void runWebviewScript(pollScript).catch(() => {});
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [canUseNativeWebview, runWebviewScript]);
+  }, [downloadsFolder, onDownloadEvent]);
 
   return (
     <section className="mt-4 rounded-[28px] border border-white/10 bg-slate-950/40 p-6 shadow-[0_20px_80px_rgba(2,6,23,0.35)]">
@@ -952,16 +523,6 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
           >
             <ExternalLink className="h-4 w-4" />
             Open in browser
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void openUrl("https://discord.com/app");
-            }}
-            className="inline-flex items-center gap-2 rounded-full border border-fuchsia-300/35 bg-fuchsia-500/15 px-4 py-2 text-sm font-medium text-fuchsia-100 transition hover:bg-fuchsia-500/25"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open Full Discord in Browser
           </button>
         </div>
       </div>
@@ -1043,17 +604,14 @@ export function DiscordTab({ rememberWebSessions, gameModRoot, onDownloadEvent }
       </div>
 
       {nativeError ? <p className="mt-2 text-xs text-amber-200/90">Native webview error: {nativeError}</p> : null}
-      {downloading ? <p className="mt-2 text-xs text-cyan-100/90">Installing selected download...</p> : null}
-      {downloadError ? <p className="mt-2 text-xs text-rose-200/90">Download install failed: {downloadError}</p> : null}
+      {downloading ? <p className="mt-2 text-xs text-cyan-100/90">Downloading...</p> : null}
+      {downloadError ? <p className="mt-2 text-xs text-rose-200/90">Download failed: {downloadError}</p> : null}
       {localInstallStatus ? <p className="mt-2 text-xs text-emerald-200/90">{localInstallStatus}</p> : null}
       <p className="mt-2 text-xs text-slate-300/85">
-        Discord blocks iframe embeds, so this tab uses a native webview profile instead of an iframe.
-      </p>
-      <p className="mt-1 text-xs text-slate-300/85">Download mode: In-app managed download.</p>
-      {lastCapturedUrl ? <p className="mt-1 text-xs text-slate-300/85">Last captured URL: {lastCapturedUrl}</p> : null}
-      <p className="mt-1 text-xs text-slate-300/85">
-        Capture diagnostics: {captureCount} event{captureCount === 1 ? "" : "s"} received{lastCaptureAt ? `, last at ${new Date(lastCaptureAt).toLocaleTimeString()}` : ""}.
+        Downloads inside Discord land in your download folder automatically. Any link Discord tries to
+        open in a new tab opens in your real browser instead (needed for logins/CDN sessions).
       </p>
     </section>
   );
 }
+

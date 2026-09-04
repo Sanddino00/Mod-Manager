@@ -1,7 +1,7 @@
 use base64::Engine;
 use ddsfile::Dds;
 use image::ImageFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -11,7 +11,8 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tauri::{image::Image, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size};
+use tauri::{image::Image, Emitter, Listener, LogicalPosition, LogicalSize, Manager, Position, Size};
+use tauri_plugin_opener::OpenerExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -1795,6 +1796,229 @@ fn webview_eval(
     webview.eval(&script).map_err(|err| err.to_string())
 }
 
+fn unique_download_destination(dir: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let mut target = dir.join(file_name);
+    let mut idx: u32 = 1;
+    let name_lossy = file_name.to_string_lossy().into_owned();
+    while target.exists() {
+        let stem = Path::new(&name_lossy)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download");
+        let ext = Path::new(&name_lossy)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let next_name = if ext.is_empty() {
+            format!("{stem}_copy{idx}")
+        } else {
+            format!("{stem}_copy{idx}.{ext}")
+        };
+        target = dir.join(next_name);
+        idx += 1;
+    }
+    target
+}
+
+// Handles the real WebView2/WKWebView download flow so Discord attachment CDNs and
+// Arca.live cloud-storage downloads land in the app's managed folder, regardless of
+// whether the site triggers them via a link, redirect, or JS confirm button.
+fn handle_browser_download(
+    app: &tauri::AppHandle,
+    source: &str,
+    downloads_dir: &Path,
+    event: tauri::webview::DownloadEvent<'_>,
+) -> bool {
+    match event {
+        tauri::webview::DownloadEvent::Requested { url, destination } => {
+            let _ = fs::create_dir_all(downloads_dir);
+            let file_name = destination
+                .file_name()
+                .map(|name| name.to_os_string())
+                .unwrap_or_else(|| std::ffi::OsString::from("download.bin"));
+            let resolved = unique_download_destination(downloads_dir, &file_name);
+
+            let _ = app.emit(
+                "mod-manager-web-download-started",
+                json!({
+                    "source": source,
+                    "url": url.to_string(),
+                    "fileName": resolved.file_name().and_then(|n| n.to_str()),
+                    "path": resolved.to_str(),
+                }),
+            );
+
+            *destination = resolved;
+            true
+        }
+        tauri::webview::DownloadEvent::Finished { url, path, success } => {
+            let payload = json!({
+                "source": source,
+                "url": url.to_string(),
+                "fileName": path.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()),
+                "path": path.as_ref().and_then(|p| p.to_str()),
+                "success": success,
+            });
+            let _ = app.emit("mod-manager-web-download-finished", payload);
+            true
+        }
+        _ => true,
+    }
+}
+
+// Creates the embedded Discord/Arca browser panel via Rust (instead of the JS Webview API) so
+// real `on_download` hooks can be attached, giving the tab genuine in-app download handling.
+// `on_new_window` is deliberately NOT used to build another window/webview: that callback runs
+// on the main UI thread, and building a window there self-deadlocks the whole app. Instead any
+// second-tab/popup request is handed off to the system's real default browser (which also has
+// the user's actual login/session for that site).
+#[tauri::command]
+async fn create_managed_browser_webview(
+    app: tauri::AppHandle,
+    window_label: String,
+    label: String,
+    url: String,
+    source: String,
+    downloads_folder: String,
+    data_directory: Option<String>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if app.get_webview(&label).is_some() {
+        return Ok(());
+    }
+
+    let window = app
+        .get_window(&window_label)
+        .ok_or_else(|| format!("Window '{window_label}' not found"))?;
+
+    let trimmed = url.trim();
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+        return Err("Invalid browser URL".to_string());
+    }
+    let parsed = tauri::Url::parse(trimmed).map_err(|err| err.to_string())?;
+
+    let downloads_dir = PathBuf::from(downloads_folder.trim());
+
+    let download_app = app.clone();
+    let download_source = source.clone();
+    let download_dir = downloads_dir.clone();
+
+    let newwin_app = app.clone();
+
+    // `add_child` hops to the main thread and blocks for the result, so this must run off
+    // whatever thread is dispatching this command to avoid a self-deadlock on the UI thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut builder = tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed))
+            .on_download(move |_webview, event| {
+                handle_browser_download(&download_app, &download_source, &download_dir, event)
+            })
+            .on_new_window(move |new_url, _features| {
+                let _ = newwin_app.opener().open_url(new_url.to_string(), None::<&str>);
+                tauri::webview::NewWindowResponse::Deny
+            });
+
+        if let Some(dir) = data_directory.filter(|value| !value.trim().is_empty()) {
+            builder = builder.data_directory(PathBuf::from(dir));
+        }
+
+        window
+            .add_child(
+                builder,
+                Position::Logical(LogicalPosition::new(x, y)),
+                Size::Logical(LogicalSize::new(width, height)),
+            )
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+static RELAY_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[tauri::command]
+fn gamebanana_relay_response(app: tauri::AppHandle, request_id: String, ok: bool, body: String) -> Result<(), String> {
+    app.emit(&format!("gamebanana-relay-{request_id}"), json!({ "ok": ok, "body": body }))
+        .map_err(|err| err.to_string())
+}
+
+// Fetches GameBanana API endpoints through the embedded GameBanana webview's own JS `fetch`
+// (with credentials included) so the request carries the real logged-in session cookies and
+// looks like normal in-browser traffic. A plain curl request with a copied cookie gets blocked
+// by GameBanana's bot protection, which previously broke the whole Mod Browser tab.
+#[tauri::command]
+async fn gamebanana_api_request_via_webview(app: tauri::AppHandle, endpoint: String) -> Result<String, String> {
+    let trimmed = endpoint.trim().trim_start_matches('/').to_string();
+    if trimmed.is_empty() {
+        return Err("Missing GameBanana API endpoint".to_string());
+    }
+
+    let webview = app
+        .get_webview("gb-browser-view")
+        .ok_or_else(|| "Open the GameBanana tab under Modding Sides once first.".to_string())?;
+
+    let request_id = RELAY_REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst).to_string();
+    let event_name = format!("gamebanana-relay-{request_id}");
+
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
+    let tx = std::sync::Mutex::new(Some(tx));
+
+    let listener_id = app.listen_any(event_name, move |event| {
+        if let Ok(payload) = serde_json::from_str::<Value>(event.payload()) {
+            let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let body = payload
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if let Some(sender) = tx.lock().unwrap().take() {
+                let _ = sender.send((ok, body));
+            }
+        }
+    });
+
+    let url = format!("https://gamebanana.com/apiv11/{trimmed}");
+    let script = format!(
+        r#"(() => {{
+      fetch({url_json}, {{ credentials: 'include', headers: {{ Accept: 'application/json' }} }})
+        .then((response) => response.text())
+        .then((body) => {{
+          window.__TAURI_INTERNALS__.invoke('gamebanana_relay_response', {{ requestId: {request_id_json}, ok: true, body }});
+        }})
+        .catch((err) => {{
+          window.__TAURI_INTERNALS__.invoke('gamebanana_relay_response', {{ requestId: {request_id_json}, ok: false, body: String(err) }});
+        }});
+    }})();"#,
+        url_json = json!(url),
+        request_id_json = json!(request_id),
+    );
+
+    if let Err(err) = webview.eval(&script) {
+        app.unlisten(listener_id);
+        return Err(err.to_string());
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+
+    app.unlisten(listener_id);
+
+    match result {
+        Ok((true, body)) => Ok(body),
+        Ok((false, body)) => Err(format!("GameBanana request failed: {body}")),
+        Err(_) => Err(
+            "Timed out waiting for GameBanana. Keep the GameBanana tab open (Modding Sides) and try again."
+                .to_string(),
+        ),
+    }
+}
+
 #[tauri::command]
 fn emit_web_download_request(
     app: tauri::AppHandle,
@@ -1810,6 +2034,74 @@ fn emit_web_download_request(
 
     app.emit("mod-manager-web-download-request", payload)
         .map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadLogEntry {
+    id: String,
+    source: String,
+    status: String,
+    mod_name: String,
+    file_name: String,
+    destination_path: String,
+    installed_path: Option<String>,
+    preview_path: Option<String>,
+    message: Option<String>,
+    started_at: f64,
+    finished_at: Option<f64>,
+}
+
+fn download_log_path() -> Result<PathBuf, String> {
+    let resources_dir = resolve_resources_dir()?;
+    Ok(resources_dir.join("downloads.json"))
+}
+
+// Persists completed/failed downloads across app restarts so the Downloads tab keeps its
+// history instead of resetting every session.
+#[tauri::command]
+fn load_download_log() -> Result<Vec<DownloadLogEntry>, String> {
+    let path = download_log_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn append_download_log_entry(entry: DownloadLogEntry) -> Result<(), String> {
+    let path = download_log_path()?;
+    let mut entries: Vec<DownloadLogEntry> = if path.exists() {
+        let body = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        serde_json::from_str(&body).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    entries.retain(|existing| existing.id != entry.id);
+    entries.push(entry);
+
+    const MAX_ENTRIES: usize = 500;
+    if entries.len() > MAX_ENTRIES {
+        let excess = entries.len() - MAX_ENTRIES;
+        entries.drain(0..excess);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(&entries).map_err(|err| err.to_string())?;
+    fs::write(&path, body).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn clear_download_log() -> Result<(), String> {
+    let path = download_log_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -7744,7 +8036,13 @@ pub fn run() {
             toggle_mod_folder,
             rename_mod_folder,
             webview_eval,
+            create_managed_browser_webview,
             emit_web_download_request,
+            gamebanana_relay_response,
+            gamebanana_api_request_via_webview,
+            load_download_log,
+            append_download_log_entry,
+            clear_download_log,
             toggle_item_favorite,
             load_fixes_panel,
             run_fix_script,
