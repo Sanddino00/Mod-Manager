@@ -15,7 +15,7 @@ Features:
 
 - Drag and drop to add mods
 
-- toggle choice save (globalpersist) and rename funktion
+- toggle choice save (globalpersist) and rename function
 
 - Integration for Nextcloud downloading incase you host your own cloud (uses public share links) 
 
