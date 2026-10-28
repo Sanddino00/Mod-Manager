@@ -46,11 +46,13 @@ Included Fixes:
 
 - Genshin Fixes (5.7, Orfix, Facefix)
 
-- Star Rail Fixes (All Fixes from 3.0 to 4.2, Pipeline Converter(, Intel 3.7 Fix will be added))
+- Star Rail Fixes (All Fixes from 2.0 to Now, Pipeline Converter)
 
-- Wuwa Fixer (Moonholder Fix, RabbitFx), Woju Fixer for 3.5
+- Wuwa Fixer (Moonholder Fix, RabbitFx, Woju Fixer )
 
-- ZZZ Fixes up to 3.0
+- ZZZ Fixes (up to 3.0)
+
+- Endfield (up to 1.3, newer fixes will be added at some points) 
 
 
 Supported Games:
