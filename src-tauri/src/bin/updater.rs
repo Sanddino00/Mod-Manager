@@ -9,7 +9,6 @@
 ///   3. Re-launch mod-manager-v2.exe and exit.
 ///
 /// The manager itself handles replacing update.exe after it relaunches.
-
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -67,7 +66,10 @@ fn main() {
 
     // Step 1: Wait for the manager to fully exit
     if let Some(pid) = manager_pid {
-        log_line(&install_dir, &format!("Waiting for manager PID {pid} to exit..."));
+        log_line(
+            &install_dir,
+            &format!("Waiting for manager PID {pid} to exit..."),
+        );
         wait_for_process_exit(pid);
         log_line(&install_dir, "Manager exited.");
     } else {
@@ -97,16 +99,20 @@ fn main() {
             log_line(&install_dir, "App download failed — keeping existing exe.");
         }
     } else {
-        log_line(&install_dir, "No --app-url provided; skipping app download.");
+        log_line(
+            &install_dir,
+            "No --app-url provided; skipping app download.",
+        );
     }
 
     // Step 3: Re-launch manager (manager will handle updating update.exe itself)
     let manager_exe = install_dir.join("mod-manager-v2.exe");
     if manager_exe.exists() {
-        log_line(&install_dir, &format!("Relaunching {}", manager_exe.display()));
-        let _ = Command::new(&manager_exe)
-            .current_dir(&install_dir)
-            .spawn();
+        log_line(
+            &install_dir,
+            &format!("Relaunching {}", manager_exe.display()),
+        );
+        let _ = Command::new(&manager_exe).current_dir(&install_dir).spawn();
     } else {
         log_line(
             &install_dir,
@@ -135,13 +141,7 @@ fn wait_for_process_exit(pid: u32) {
 
 fn is_process_running(pid: u32) -> bool {
     let output = Command::new("tasklist")
-        .args([
-            "/FI",
-            &format!("PID eq {}", pid),
-            "/NH",
-            "/FO",
-            "CSV",
-        ])
+        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
         .output();
 
     match output {
@@ -236,5 +236,3 @@ fn write_installed_app_tag(install_dir: &PathBuf, tag: &str) -> Result<(), Strin
     std::fs::write(&settings_path, body).map_err(|e| e.to_string())?;
     Ok(())
 }
-
-

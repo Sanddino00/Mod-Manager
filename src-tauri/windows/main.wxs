@@ -1,12 +1,9 @@
-﻿<?if $(sys.BUILDARCH)="x86"?>
+<?if $(sys.BUILDARCH)="x86"?>
     <?define Win64 = "no" ?>
-    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?elseif $(sys.BUILDARCH)="x64"?>
     <?define Win64 = "yes" ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
 <?elseif $(sys.BUILDARCH)="arm64"?>
     <?define Win64 = "yes" ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
 <?else?>
     <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
 <?endif?>
@@ -25,7 +22,7 @@
                  InstallerVersion="450"
                  Languages="0"
                  Compressed="yes"
-                 InstallScope="perMachine"
+                 InstallScope="perUser"
                  SummaryCodepage="!(loc.TauriCodepage)"/>
 
         <!-- https://docs.microsoft.com/en-us/windows/win32/msi/reinstallmode -->
@@ -47,18 +44,6 @@
         <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
         <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
 
-
-        <!-- NOTE: The order of RegistrySearch elements below matters. In WIX, when multiple
-             RegistrySearch elements are listed under a single Property, the LAST successful
-             match wins. We list the NSIS default-key search first and the MSI InstallDir
-             search second so that the MSI-specific path takes priority when both keys exist. -->
-        <Property Id="INSTALLDIR">
-          <!-- First attempt: Search for the default key value (this is how the nsis installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\sandrino\mod-manager-v2" Type="raw" />
-
-          <!-- Second attempt: Search for "InstallDir" which takes priority if found (this is how the msi installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="InstallDir" Type="raw" />
-        </Property>
 
         <!-- launch app checkbox -->
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
@@ -87,8 +72,10 @@
         <UIRef Id="WixUI_InstallDir" />
 
         <Directory Id="TARGETDIR" Name="SourceDir">
-            <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
-                <Directory Id="INSTALLDIR" Name="mod-manager-v2"/>
+            <Directory Id="LocalAppDataFolder">
+                <Directory Id="UserProgramsFolder" Name="Programs">
+                    <Directory Id="INSTALLDIR" Name="mod-manager-v2"/>
+                </Directory>
             </Directory>
             <Directory Id="ProgramMenuFolder">
                 <Directory Id="ApplicationProgramsFolder" Name="mod-manager-v2" />
@@ -101,13 +88,25 @@
                 <RegistryKey Root="HKCU" Key="Software\sandrino\mod-manager-v2">
                     <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
                 </RegistryKey>
-                <!-- Change the Root to HKCU for perUser installations -->
-</Component>
+            </Component>
             <Component Id="Path" Guid="46e2f8f4-b78b-5b37-995d-3899bd043555" Win64="$(var.Win64)">
-                <File Id="Path" Source="$(sys.SOURCEFILEDIR)..\..\mod-manager-v2.exe" KeyPath="yes" Checksum="yes"/>
-</Component>
-<Component Id="updater" Guid="ee80ccd9-30a6-4ef3-b50d-3737f93851c1" Win64="$(var.Win64)">
-                <File Id="Bin_updater" Source="$(sys.SOURCEFILEDIR)..\..\updater.exe" KeyPath="yes"/>
+                <File Id="Path" Source="$(sys.SOURCEFILEDIR)..\..\mod-manager-v2.exe" Checksum="yes"/>
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="AppExecutable" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="updater" Guid="ee80ccd9-30a6-4ef3-b50d-3737f93851c1" Win64="$(var.Win64)">
+                <File Id="Bin_updater" Source="$(sys.SOURCEFILEDIR)..\..\updater.exe"/>
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="UpdaterExecutable" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+            <Component Id="InstallDirCleanup" Guid="*">
+                <RemoveFolder Id="RemoveInstallDir" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="InstallDirCleanup" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="UserProgramsFolder">
+            <Component Id="UserProgramsFolderCleanup" Guid="*">
+                <RemoveFolder Id="RemoveUserProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\sandrino\mod-manager-v2" Name="UserProgramsFolderCleanup" Type="integer" Value="1" KeyPath="yes" />
             </Component>
         </DirectoryRef>
 
@@ -151,6 +150,8 @@
                 Absent="disallow">
 
             <ComponentRef Id="RegistryEntries"/>
+            <ComponentRef Id="InstallDirCleanup"/>
+            <ComponentRef Id="UserProgramsFolderCleanup"/>
 
             <Feature Id="ShortcutsFeature"
                 Title="Shortcuts"
@@ -200,4 +201,3 @@
         <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
     </Product>
 </Wix>
-

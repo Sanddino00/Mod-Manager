@@ -52,11 +52,14 @@ function deriveNameFromUrl(url: string, fallback = "download"): string {
 }
 
 function deriveModName(fileName: string): string {
-  return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
+  return fileName
+    .replace(/\.(?:zip|7z|rar)?\.001$/iu, "")
+    .replace(/\.[A-Za-z0-9]{1,8}$/u, "")
+    .trim() || "Imported Mod";
 }
 
 function isLikelyDownloadUrl(url: string): boolean {
-  return /\/dl\/|download|attachment/i.test(url) || /\.(zip|7z|rar|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
+  return /\/dl\/|download|attachment/i.test(url) || /\.(zip|7z|rar|001|pak|exe|dll|txt)(?:$|[?#])/i.test(url);
 }
 
 export function GameBananaWebTab({
@@ -199,7 +202,7 @@ export function GameBananaWebTab({
       directory: false,
       title: "Select downloaded archive",
       defaultPath: downloadsFolder,
-      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar"] }],
+      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar", "001"] }],
     });
 
     if (!picked) {
@@ -523,7 +526,7 @@ export function GameBananaWebTab({
         }
         (window).__modManagerGbDownloadHookInstalled = true;
 
-        const isDownloadUrl = (url) => /\\/dl\\/|\\bdownloads?\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+        const isDownloadUrl = (url) => /\\/dl\\/|\\bdownloads?\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|001|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
         const URL_RE = /https?:\\/\\/[^\\s"'<>]+/i;
 
         const toAbsoluteUrl = (value) => {

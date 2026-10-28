@@ -3,6 +3,8 @@ use ddsfile::Dds;
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
@@ -11,16 +13,20 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
-use tauri::{image::Image, Emitter, Listener, LogicalPosition, LogicalSize, Manager, Position, Size};
+use tauri::{
+    image::Image, Emitter, Listener, LogicalPosition, LogicalSize, Manager, Position, Size,
+};
 use tauri_plugin_opener::OpenerExt;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+mod model_viewer;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
 const DEFAULT_VERSION: &str = "1.2.3";
-const APP_RELEASES_API: &str = "https://api.github.com/repos/Sanddino00/Mod-Manager/releases/latest";
+const APP_RELEASES_API: &str =
+    "https://api.github.com/repos/Sanddino00/Mod-Manager/releases/latest";
 const RESOURCES_RELEASES_API: &str =
     "https://api.github.com/repos/Sanddino00/Resources-for-Fixmanager-and-Modmanager/releases/latest";
 const CUSTOM_FIXES_DIR_NAME: &str = "custom fixes";
@@ -40,6 +46,7 @@ struct BootstrapState {
     legacy_install: Option<LegacyInstall>,
     settings: Value,
     settings_found: bool,
+    can_migrate_install: bool,
     detected_paths: Vec<String>,
     app_version: String,
     needs_setup: bool,
@@ -116,6 +123,12 @@ struct GameInventorySummary {
     game: String,
     mod_root: String,
     categories: Vec<CategoryInventorySummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct CharacterModCleanupResult {
+    moved: Vec<String>,
+    failures: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -373,7 +386,6 @@ fn read_install_path_from_file(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(install_path))
 }
 
-
 fn local_install_base() -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -535,9 +547,8 @@ fn load_settings_snapshot() -> Result<Value, String> {
         }
     }
 
-    let base_dir = resolve_install_base().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
+    let base_dir = resolve_install_base()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     Ok(default_settings(&base_dir))
 }
 
@@ -607,7 +618,9 @@ fn find_first_ini_file(mod_folder_path: &Path) -> Option<PathBuf> {
                 2
             };
 
-            left_rank.cmp(&right_rank).then_with(|| left_name.cmp(&right_name))
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left_name.cmp(&right_name))
         });
 
         if let Some(root_ini) = root_ini_files.into_iter().next() {
@@ -848,7 +861,10 @@ fn resolve_icon_path(icon_dirs: &[String], item_id: &str) -> Option<String> {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or_default();
-                if !["webp", "png", "jpg", "jpeg"].iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+                if !["webp", "png", "jpg", "jpeg"]
+                    .iter()
+                    .any(|x| x.eq_ignore_ascii_case(ext))
+                {
                     continue;
                 }
 
@@ -881,11 +897,17 @@ fn resolve_icon_path(icon_dirs: &[String], item_id: &str) -> Option<String> {
                             .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or_default();
-                        if !["webp", "png", "jpg", "jpeg"].iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+                        if !["webp", "png", "jpg", "jpeg"]
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(ext))
+                        {
                             continue;
                         }
 
-                        let stem = icon.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                        let stem = icon
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default();
                         if matches_icon_stem(stem, item_id) {
                             return Some(local_path(&icon));
                         }
@@ -1017,10 +1039,7 @@ fn spawn_possibly_elevated(
     work_dir: &std::path::Path,
     args: &[String],
 ) -> Result<(), String> {
-    let result = Command::new(path)
-        .current_dir(work_dir)
-        .args(args)
-        .spawn();
+    let result = Command::new(path).current_dir(work_dir).args(args).spawn();
 
     match result {
         Ok(_) => Ok(()),
@@ -1250,9 +1269,9 @@ fn default_settings(base_dir: &Path) -> Value {
         "arca_saved_username": "",
         "arca_saved_password": "",
         "dev_mode": false,
+        "dev_show_install_repair": false,
         "dev_use_image_background": false,
         "dev_use_all_backgrounds": false,
-        "dev_enable_model_preview_tab": false,
         "last_release_tag": Value::Null,
         "last_app_release_tag": Value::Null,
         "last_resources_release_tag": Value::Null,
@@ -1338,10 +1357,12 @@ fn collect_fix_scripts_recursive(
             .to_string_lossy()
             .replace('\\', "/");
 
-        dedupe.entry(rel.clone()).or_insert_with(|| FixScriptSummary {
-            name: rel,
-            kind: kind.to_string(),
-        });
+        dedupe
+            .entry(rel.clone())
+            .or_insert_with(|| FixScriptSummary {
+                name: rel,
+                kind: kind.to_string(),
+            });
     }
 
     Ok(())
@@ -1365,11 +1386,7 @@ fn merge_json(base: &mut Value, loaded: &Value) {
     }
 }
 
-fn push_candidate(
-    candidates: &mut Vec<PathBuf>,
-    seen: &mut HashSet<String>,
-    candidate: PathBuf,
-) {
+fn push_candidate(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<String>, candidate: PathBuf) {
     if candidate.as_os_str().is_empty() {
         return;
     }
@@ -1406,11 +1423,7 @@ fn legacy_candidate_paths() -> Vec<PathBuf> {
         for ancestor in seed.ancestors().take(6) {
             let ancestor = ancestor.to_path_buf();
             push_candidate(&mut candidates, &mut seen, ancestor.clone());
-            push_candidate(
-                &mut candidates,
-                &mut seen,
-                ancestor.join("modmanager"),
-            );
+            push_candidate(&mut candidates, &mut seen, ancestor.join("modmanager"));
             push_candidate(
                 &mut candidates,
                 &mut seen,
@@ -1455,6 +1468,23 @@ fn detect_legacy_install() -> Option<LegacyInstall> {
             None
         }
     })
+}
+
+fn can_migrate_install(legacy_install: Option<&LegacyInstall>, current_dir: &Path) -> bool {
+    let Some(legacy_install) = legacy_install else {
+        return false;
+    };
+    if !normalize_path(Path::new(&legacy_install.base_dir))
+        .eq_ignore_ascii_case(&normalize_path(current_dir))
+    {
+        return false;
+    }
+
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return false;
+    };
+    let target_dir = local_app_data.join("Programs").join("mod-manager-v2");
+    !normalize_path(current_dir).eq_ignore_ascii_case(&normalize_path(&target_dir))
 }
 
 fn load_settings_from_install(install: &LegacyInstall) -> (Value, bool) {
@@ -1533,6 +1563,7 @@ fn load_bootstrap_state() -> Result<BootstrapState, String> {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let exe_dir_str = normalize_path(&exe_dir);
+    let can_migrate_install = can_migrate_install(legacy_install.as_ref(), &exe_dir);
 
     let needs_setup = legacy_install.is_none() && !settings_found;
 
@@ -1540,6 +1571,7 @@ fn load_bootstrap_state() -> Result<BootstrapState, String> {
         legacy_install,
         settings,
         settings_found,
+        can_migrate_install,
         detected_paths,
         app_version,
         needs_setup,
@@ -1628,13 +1660,26 @@ fn load_game_inventory(game: String, mod_root: String) -> Result<GameInventorySu
             let category_folder = build_item_folder_path(&mod_root_path, category, None);
             let game_human = match game.as_str() {
                 "gi" => "genshin",
-                "hsr" => "hsr",
+                "hsr" => "star rail",
                 "wuwa" => "wuwa",
                 "zzz" => "zzz",
                 "end" => "end",
                 _ => game.as_str(),
             };
             let icon_candidates = vec![
+                resources_dir
+                    .parent()
+                    .unwrap_or(&resources_dir)
+                    .join("app")
+                    .join("icons")
+                    .join(game_human)
+                    .join(category),
+                resources_dir
+                    .parent()
+                    .unwrap_or(&resources_dir)
+                    .join("app")
+                    .join("icons")
+                    .join(game_human),
                 icons_base.join(format!("{}_{}", game, category)),
                 icons_base.join(format!("{}_{}", game_human, category)),
                 icons_base.join(&game),
@@ -1755,10 +1800,7 @@ fn rename_mod_folder(path: String, new_name: String) -> Result<String, String> {
     }
 
     let sanitized = sanitize_folder_name(requested);
-    let base_name = sanitized
-        .trim_start_matches("DISABLED_")
-        .trim()
-        .to_string();
+    let base_name = sanitized.trim_start_matches("DISABLED_").trim().to_string();
     if base_name.is_empty() {
         return Err("Folder name cannot be empty".to_string());
     }
@@ -1784,11 +1826,7 @@ fn rename_mod_folder(path: String, new_name: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn webview_eval(
-    app: tauri::AppHandle,
-    label: String,
-    script: String,
-) -> Result<(), String> {
+fn webview_eval(app: tauri::AppHandle, label: String, script: String) -> Result<(), String> {
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| format!("Webview '{label}' not found"))?;
@@ -1911,14 +1949,17 @@ async fn create_managed_browser_webview(
     // `add_child` hops to the main thread and blocks for the result, so this must run off
     // whatever thread is dispatching this command to avoid a self-deadlock on the UI thread.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut builder = tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed))
-            .on_download(move |_webview, event| {
-                handle_browser_download(&download_app, &download_source, &download_dir, event)
-            })
-            .on_new_window(move |new_url, _features| {
-                let _ = newwin_app.opener().open_url(new_url.to_string(), None::<&str>);
-                tauri::webview::NewWindowResponse::Deny
-            });
+        let mut builder =
+            tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed))
+                .on_download(move |_webview, event| {
+                    handle_browser_download(&download_app, &download_source, &download_dir, event)
+                })
+                .on_new_window(move |new_url, _features| {
+                    let _ = newwin_app
+                        .opener()
+                        .open_url(new_url.to_string(), None::<&str>);
+                    tauri::webview::NewWindowResponse::Deny
+                });
 
         if let Some(dir) = data_directory.filter(|value| !value.trim().is_empty()) {
             builder = builder.data_directory(PathBuf::from(dir));
@@ -1940,9 +1981,17 @@ async fn create_managed_browser_webview(
 static RELAY_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tauri::command]
-fn gamebanana_relay_response(app: tauri::AppHandle, request_id: String, ok: bool, body: String) -> Result<(), String> {
-    app.emit(&format!("gamebanana-relay-{request_id}"), json!({ "ok": ok, "body": body }))
-        .map_err(|err| err.to_string())
+fn gamebanana_relay_response(
+    app: tauri::AppHandle,
+    request_id: String,
+    ok: bool,
+    body: String,
+) -> Result<(), String> {
+    app.emit(
+        &format!("gamebanana-relay-{request_id}"),
+        json!({ "ok": ok, "body": body }),
+    )
+    .map_err(|err| err.to_string())
 }
 
 // Fetches GameBanana API endpoints through the embedded GameBanana webview's own JS `fetch`
@@ -1950,7 +1999,10 @@ fn gamebanana_relay_response(app: tauri::AppHandle, request_id: String, ok: bool
 // looks like normal in-browser traffic. A plain curl request with a copied cookie gets blocked
 // by GameBanana's bot protection, which previously broke the whole Mod Browser tab.
 #[tauri::command]
-async fn gamebanana_api_request_via_webview(app: tauri::AppHandle, endpoint: String) -> Result<String, String> {
+async fn gamebanana_api_request_via_webview(
+    app: tauri::AppHandle,
+    endpoint: String,
+) -> Result<String, String> {
     let trimmed = endpoint.trim().trim_start_matches('/').to_string();
     if trimmed.is_empty() {
         return Err("Missing GameBanana API endpoint".to_string());
@@ -1960,7 +2012,9 @@ async fn gamebanana_api_request_via_webview(app: tauri::AppHandle, endpoint: Str
         .get_webview("gb-browser-view")
         .ok_or_else(|| "Open the GameBanana tab under Modding Sides once first.".to_string())?;
 
-    let request_id = RELAY_REQUEST_COUNTER.fetch_add(1, Ordering::SeqCst).to_string();
+    let request_id = RELAY_REQUEST_COUNTER
+        .fetch_add(1, Ordering::SeqCst)
+        .to_string();
     let event_name = format!("gamebanana-relay-{request_id}");
 
     let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>();
@@ -2155,7 +2209,7 @@ fn load_fixes_panel(game: String) -> Result<FixesPanelData, String> {
 }
 
 #[tauri::command]
-fn run_fix_script(game: String, script_name: String, target_path: String) -> Result<(), String> {
+fn run_fix_script(game: String, script_name: String, target_path: String) -> Result<bool, String> {
     let resources_dir = resolve_resources_dir()?;
     ensure_custom_fixes_scaffold(&resources_dir)?;
     let script_relative = sanitize_script_relative_path(&script_name)?;
@@ -2175,67 +2229,65 @@ fn run_fix_script(game: String, script_name: String, target_path: String) -> Res
         return Err("Script not found".to_string());
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        let target_dir = PathBuf::from(&target_path);
-        let cwd = if target_dir.is_dir() {
-            target_dir
-        } else {
-            target_dir
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(&target_path))
-        };
+    let target_dir = PathBuf::from(&target_path);
+    let cwd = if target_dir.is_dir() {
+        target_dir
+    } else if target_dir.is_file() {
+        target_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+            format!("Could not determine the Run working directory for {target_path}.")
+        })?
+    } else {
+        return Err(format!(
+            "The selected Run working directory does not exist: {}",
+            target_dir.display()
+        ));
+    };
 
-        let extension = script_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+    let launched_in_console = {
+        #[cfg(target_os = "windows")]
+        {
+            let extension = script_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
 
-        if extension == "py" {
-            let run_cmd = format!("python -u '{}'", script_path.display());
-
-            // Open a persistent console so script output/errors remain visible.
-            Command::new("powershell")
-                .current_dir(&cwd)
-                .args(["-NoExit", "-Command", &run_cmd])
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        } else {
-            // Keep terminal open and run EXE with robust path quoting.
-            let run_cmd = format!("& '{}'", script_path.display());
-            Command::new("powershell")
-                .current_dir(&cwd)
-                .args(["-NoExit", "-Command", &run_cmd])
-                .spawn()
-                .map_err(|err| err.to_string())?;
+            if extension == "py" {
+                let mut command = Command::new("python");
+                let script_arg = script_path.to_string_lossy();
+                command.current_dir(&cwd).arg("-u").arg(script_arg.as_ref());
+                command.creation_flags(CREATE_NEW_CONSOLE);
+                command.spawn().map_err(|err| err.to_string())?;
+                true
+            } else {
+                let mut command = Command::new(&script_path);
+                command.current_dir(&cwd);
+                let has_console = model_viewer::executable_has_console_subsystem(&script_path)?;
+                if has_console {
+                    command.creation_flags(CREATE_NEW_CONSOLE);
+                } else {
+                    command.creation_flags(CREATE_NO_WINDOW);
+                }
+                command.spawn().map_err(|err| err.to_string())?;
+                has_console
+            }
         }
-    }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let target_dir = PathBuf::from(&target_path);
-        let cwd = if target_dir.is_dir() {
-            target_dir
-        } else {
-            target_dir
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(&target_path))
-        };
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new(&script_path)
+                .current_dir(&cwd)
+                .spawn()
+                .map_err(|err| err.to_string())?;
+            false
+        }
+    };
 
-        Command::new(&script_path)
-            .current_dir(cwd)
-            .spawn()
-            .map_err(|err| err.to_string())?;
-    }
-
-    Ok(())
+    Ok(launched_in_console)
 }
 
 #[tauri::command]
-fn launch_fix_script_source(game: String, script_name: String) -> Result<(), String> {
+fn launch_fix_script_source(game: String, script_name: String) -> Result<bool, String> {
     let resources_dir = resolve_resources_dir()?;
     ensure_custom_fixes_scaffold(&resources_dir)?;
     let script_relative = sanitize_script_relative_path(&script_name)?;
@@ -2260,41 +2312,53 @@ fn launch_fix_script_source(game: String, script_name: String) -> Result<(), Str
         .map(Path::to_path_buf)
         .unwrap_or_else(|| resources_dir.clone());
 
+    let extension = script_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
     #[cfg(target_os = "windows")]
     {
-        let extension = script_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-
         if extension == "py" {
-            let run_cmd = format!("python -u '{}'", script_path.display());
-
-            Command::new("powershell")
+            let mut command = Command::new("python");
+            let script_arg = script_path.to_string_lossy();
+            command
                 .current_dir(&source_dir)
-                .args(["-NoExit", "-Command", &run_cmd])
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        } else {
-            let run_cmd = format!("& '{}'", script_path.display());
-            Command::new("powershell")
-                .current_dir(&source_dir)
-                .args(["-NoExit", "-Command", &run_cmd])
-                .spawn()
-                .map_err(|err| err.to_string())?;
+                .arg("-u")
+                .arg(script_arg.as_ref())
+                .creation_flags(CREATE_NEW_CONSOLE);
+            command.spawn().map_err(|err| err.to_string())?;
+            return Ok(true);
         }
+
+        let has_console = model_viewer::executable_has_console_subsystem(&script_path)?;
+        let mut command = Command::new(&script_path);
+        command.current_dir(&source_dir);
+        command.creation_flags(if has_console {
+            CREATE_NEW_CONSOLE
+        } else {
+            CREATE_NO_WINDOW
+        });
+        command.spawn().map_err(|err| err.to_string())?;
+        Ok(has_console)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new(&script_path)
+        let mut command = if extension == "py" {
+            let mut python = Command::new("python3");
+            python.arg(&script_path);
+            python
+        } else {
+            Command::new(&script_path)
+        };
+        command
             .current_dir(source_dir)
             .spawn()
             .map_err(|err| err.to_string())?;
+        Ok(false)
     }
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -2349,7 +2413,8 @@ fn build_preview_glb_from_dump(
     fs::create_dir_all(&output_root).map_err(|err| err.to_string())?;
 
     let ini_path = find_first_ini_file(&mod_root);
-    let diffuse_texture_path = find_preferred_mod_diffuse_texture(&mod_root).map(|value| normalize_path(&value));
+    let diffuse_texture_path =
+        find_preferred_mod_diffuse_texture(&mod_root).map(|value| normalize_path(&value));
     let ini_first_index_texture_map = ini_path
         .as_ref()
         .map(|value| parse_ini_first_index_texture_map(value, &mod_root))
@@ -2513,16 +2578,18 @@ fn find_mod_preview_images(path: String) -> Vec<String> {
             .unwrap_or_default()
             .to_ascii_lowercase();
 
-        let left_priority = if left_name.starts_with("preview") || left_name.starts_with("0preview") {
+        let left_priority = if left_name.starts_with("preview") || left_name.starts_with("0preview")
+        {
             0
         } else {
             1
         };
-        let right_priority = if right_name.starts_with("preview") || right_name.starts_with("0preview") {
-            0
-        } else {
-            1
-        };
+        let right_priority =
+            if right_name.starts_with("preview") || right_name.starts_with("0preview") {
+                0
+            } else {
+                1
+            };
 
         left_priority
             .cmp(&right_priority)
@@ -2640,7 +2707,8 @@ fn resolve_preview_texture_bindings(
     }
 
     let ini_first_index_texture_map = parse_ini_first_index_texture_map(&ini_path, &mod_root);
-    let ini_ib_texture_map = parse_ini_ib_texture_by_resource_for_vars(&ini_path, &mod_root, &normalized_vars);
+    let ini_ib_texture_map =
+        parse_ini_ib_texture_by_resource_for_vars(&ini_path, &mod_root, &normalized_vars);
 
     let output_root = output_dir
         .as_ref()
@@ -2671,7 +2739,9 @@ fn resolve_preview_texture_bindings(
 
     let mut normalized_ib_lookup = ini_ib_texture_map
         .iter()
-        .map(|(ib_resource, texture_path)| (sanitize_material_name(ib_resource), texture_path.clone()))
+        .map(|(ib_resource, texture_path)| {
+            (sanitize_material_name(ib_resource), texture_path.clone())
+        })
         .collect::<Vec<_>>();
     normalized_ib_lookup.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
 
@@ -2731,7 +2801,8 @@ fn load_texture_data_url(path: String) -> Result<String, String> {
         let bytes = fs::read(&file_path).map_err(|err| err.to_string())?;
         let mut cursor = Cursor::new(&bytes);
         let dds = Dds::read(&mut cursor).map_err(|err| format!("Failed to parse DDS: {err}"))?;
-        let image = image_dds::image_from_dds(&dds, 0).map_err(|err| format!("Failed to decode DDS: {err}"))?;
+        let image = image_dds::image_from_dds(&dds, 0)
+            .map_err(|err| format!("Failed to decode DDS: {err}"))?;
 
         let mut encoded_png = Vec::new();
         image
@@ -3020,11 +3091,15 @@ fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMa
     let mut current_first_index: Option<u32> = None;
     let mut current_ps_slots: HashMap<String, String> = HashMap::new();
 
-    let flush_override = |first_index: Option<u32>, slot_resources: &HashMap<String, String>, out: &mut HashMap<u32, String>| {
+    let flush_override = |first_index: Option<u32>,
+                          slot_resources: &HashMap<String, String>,
+                          out: &mut HashMap<u32, String>| {
         let Some(index) = first_index else {
             return;
         };
-        let Some(resource_name) = select_override_texture_resource(slot_resources, &resource_files, mod_root) else {
+        let Some(resource_name) =
+            select_override_texture_resource(slot_resources, &resource_files, mod_root)
+        else {
             return;
         };
 
@@ -3046,8 +3121,15 @@ fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMa
         }
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if current_section.to_ascii_lowercase().starts_with("textureoverride") {
-                flush_override(current_first_index, &current_ps_slots, &mut first_index_to_texture);
+            if current_section
+                .to_ascii_lowercase()
+                .starts_with("textureoverride")
+            {
+                flush_override(
+                    current_first_index,
+                    &current_ps_slots,
+                    &mut first_index_to_texture,
+                );
             }
 
             current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
@@ -3056,7 +3138,10 @@ fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMa
             continue;
         }
 
-        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+        if !current_section
+            .to_ascii_lowercase()
+            .starts_with("textureoverride")
+        {
             continue;
         }
 
@@ -3072,14 +3157,22 @@ fn parse_ini_first_index_texture_map(ini_path: &Path, mod_root: &Path) -> HashMa
         }
     }
 
-    if current_section.to_ascii_lowercase().starts_with("textureoverride") {
-        flush_override(current_first_index, &current_ps_slots, &mut first_index_to_texture);
+    if current_section
+        .to_ascii_lowercase()
+        .starts_with("textureoverride")
+    {
+        flush_override(
+            current_first_index,
+            &current_ps_slots,
+            &mut first_index_to_texture,
+        );
     }
 
     // WWMI-style overrides often assign textures through Resource\RabbitFX\Diffuse
     // and use many drawindexed slices under conditional branches.
     let mut vars = parse_ini_default_vars(ini_path);
-    vars.entry("$mod_enabled".to_string()).or_insert_with(|| "1".to_string());
+    vars.entry("$mod_enabled".to_string())
+        .or_insert_with(|| "1".to_string());
 
     let sections = parse_ini_sections(&raw);
     for (section_name, lines) in &sections {
@@ -3217,7 +3310,10 @@ fn parse_ini_sections(raw: &str) -> HashMap<String, Vec<String>> {
         }
 
         if let Some(section) = &current_section {
-            sections.entry(section.clone()).or_default().push(trimmed.to_string());
+            sections
+                .entry(section.clone())
+                .or_default()
+                .push(trimmed.to_string());
         }
     }
 
@@ -3344,7 +3440,11 @@ fn eval_ini_condition(condition: &str, vars: &HashMap<String, String>) -> bool {
 
         let is_match = if let Some((left, right)) = term.split_once("==") {
             let key = normalize_ini_var_name(left);
-            let expected = right.trim().trim_matches('"').trim_start_matches('$').to_ascii_lowercase();
+            let expected = right
+                .trim()
+                .trim_matches('"')
+                .trim_start_matches('$')
+                .to_ascii_lowercase();
             let actual = vars
                 .get(&key)
                 .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
@@ -3352,7 +3452,11 @@ fn eval_ini_condition(condition: &str, vars: &HashMap<String, String>) -> bool {
             actual == expected
         } else if let Some((left, right)) = term.split_once("!=") {
             let key = normalize_ini_var_name(left);
-            let expected = right.trim().trim_matches('"').trim_start_matches('$').to_ascii_lowercase();
+            let expected = right
+                .trim()
+                .trim_matches('"')
+                .trim_start_matches('$')
+                .to_ascii_lowercase();
             let actual = vars
                 .get(&key)
                 .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
@@ -3468,7 +3572,14 @@ fn apply_commandlist_process_toggles_vars(
         }
 
         let enabled = eval_toggle_expression(&value, vars);
-        vars.insert(key, if enabled { "1".to_string() } else { "0".to_string() });
+        vars.insert(
+            key,
+            if enabled {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        );
     }
 }
 
@@ -3535,9 +3646,8 @@ fn collect_active_ini_assignments(
     let mut stack: Vec<IniIfFrame> = Vec::new();
     let mut out = Vec::new();
 
-    let is_effective_active = |frames: &[IniIfFrame]| -> bool {
-        frames.iter().all(|frame| frame.current_active)
-    };
+    let is_effective_active =
+        |frames: &[IniIfFrame]| -> bool { frames.iter().all(|frame| frame.current_active) };
 
     for raw_line in lines {
         let line = raw_line.trim();
@@ -3709,7 +3819,8 @@ fn parse_ini_ib_texture_by_resource_for_vars(
     let sections = parse_ini_sections(&raw);
     let mut out: HashMap<String, String> = HashMap::new();
 
-    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>, out_map: &mut HashMap<String, String>| {
+    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>,
+                            out_map: &mut HashMap<String, String>| {
         for (ib_resource, slot_resources) in pairs {
             let Some(resource_name) =
                 select_override_texture_resource(&slot_resources, &resource_files, mod_root)
@@ -3724,7 +3835,10 @@ fn parse_ini_ib_texture_by_resource_for_vars(
 
             let texture_path = mod_root.join(file_name);
             if texture_path.is_file() {
-                out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+                out_map.insert(
+                    ib_resource.to_ascii_lowercase(),
+                    normalize_path(&texture_path),
+                );
             }
         }
     };
@@ -3745,14 +3859,13 @@ fn parse_ini_ib_texture_by_resource_for_vars(
         };
 
         let assignments = collect_active_ini_assignments(lines, vars);
-        out.extend(collect_ib_texture_slot_candidates_from_assignments(&assignments));
+        out.extend(collect_ib_texture_slot_candidates_from_assignments(
+            &assignments,
+        ));
 
         for target in collect_run_targets_from_assignments(&assignments, sections) {
             out.extend(collect_texture_candidates_for_section(
-                &target,
-                sections,
-                vars,
-                visited,
+                &target, sections, vars, visited,
             ));
         }
 
@@ -3765,7 +3878,8 @@ fn parse_ini_ib_texture_by_resource_for_vars(
         }
 
         let mut visited = HashSet::new();
-        let pairs = collect_texture_candidates_for_section(section_name, &sections, vars, &mut visited);
+        let pairs =
+            collect_texture_candidates_for_section(section_name, &sections, vars, &mut visited);
         apply_candidates(pairs, &mut out);
     }
 
@@ -3826,8 +3940,8 @@ fn collect_ib_texture_slot_candidates(lines: &[String]) -> Vec<(String, HashMap<
     let mut current_ps_slots: HashMap<String, String> = HashMap::new();
 
     let flush = |out_map: &mut Vec<(String, HashMap<String, String>)>,
-                     ib: &mut Option<String>,
-                     slots: &mut HashMap<String, String>| {
+                 ib: &mut Option<String>,
+                 slots: &mut HashMap<String, String>| {
         if let Some(resource) = ib.take() {
             if !slots.is_empty() {
                 out_map.push((resource, slots.clone()));
@@ -3950,7 +4064,8 @@ fn parse_ini_ib_texture_by_resource(ini_path: &Path, mod_root: &Path) -> HashMap
     let sections = parse_ini_sections(&raw);
     let mut out: HashMap<String, String> = HashMap::new();
 
-    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>, out_map: &mut HashMap<String, String>| {
+    let apply_candidates = |pairs: Vec<(String, HashMap<String, String>)>,
+                            out_map: &mut HashMap<String, String>| {
         for (ib_resource, slot_resources) in pairs {
             let Some(resource_name) =
                 select_override_texture_resource(&slot_resources, &resource_files, mod_root)
@@ -3965,7 +4080,10 @@ fn parse_ini_ib_texture_by_resource(ini_path: &Path, mod_root: &Path) -> HashMap
 
             let texture_path = mod_root.join(file_name);
             if texture_path.is_file() {
-                out_map.insert(ib_resource.to_ascii_lowercase(), normalize_path(&texture_path));
+                out_map.insert(
+                    ib_resource.to_ascii_lowercase(),
+                    normalize_path(&texture_path),
+                );
             }
         }
     };
@@ -3988,7 +4106,9 @@ fn parse_ini_ib_texture_by_resource(ini_path: &Path, mod_root: &Path) -> HashMap
     out
 }
 
-fn parse_ini_drawindexed_ranges_by_ib_resource(ini_path: &Path) -> HashMap<String, Vec<(usize, usize)>> {
+fn parse_ini_drawindexed_ranges_by_ib_resource(
+    ini_path: &Path,
+) -> HashMap<String, Vec<(usize, usize)>> {
     let raw = match fs::read_to_string(ini_path) {
         Ok(value) => value,
         Err(_) => return HashMap::new(),
@@ -4058,21 +4178,22 @@ fn parse_ini_ib_vertex_resources(ini_path: &Path) -> HashMap<String, HashMap<Str
     let mut current_ib: Option<String> = None;
     let mut current_vb_slots: HashMap<String, String> = HashMap::new();
 
-    let flush_override = |section: &str,
-                          ib_resource: Option<String>,
-                          vb_slots: &HashMap<String, String>,
-                          out_map: &mut HashMap<String, HashMap<String, String>>| {
-        if !section.to_ascii_lowercase().starts_with("textureoverride") {
-            return;
-        }
-        let Some(ib) = ib_resource else {
-            return;
+    let flush_override =
+        |section: &str,
+         ib_resource: Option<String>,
+         vb_slots: &HashMap<String, String>,
+         out_map: &mut HashMap<String, HashMap<String, String>>| {
+            if !section.to_ascii_lowercase().starts_with("textureoverride") {
+                return;
+            }
+            let Some(ib) = ib_resource else {
+                return;
+            };
+            if vb_slots.is_empty() {
+                return;
+            }
+            out_map.insert(ib.to_ascii_lowercase(), vb_slots.clone());
         };
-        if vb_slots.is_empty() {
-            return;
-        }
-        out_map.insert(ib.to_ascii_lowercase(), vb_slots.clone());
-    };
 
     for line in raw.lines() {
         let trimmed = line.split(';').next().unwrap_or("").trim();
@@ -4081,14 +4202,22 @@ fn parse_ini_ib_vertex_resources(ini_path: &Path) -> HashMap<String, HashMap<Str
         }
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            flush_override(&current_section, current_ib.take(), &current_vb_slots, &mut out);
+            flush_override(
+                &current_section,
+                current_ib.take(),
+                &current_vb_slots,
+                &mut out,
+            );
             current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
             current_ib = None;
             current_vb_slots.clear();
             continue;
         }
 
-        if !current_section.to_ascii_lowercase().starts_with("textureoverride") {
+        if !current_section
+            .to_ascii_lowercase()
+            .starts_with("textureoverride")
+        {
             continue;
         }
 
@@ -4104,7 +4233,12 @@ fn parse_ini_ib_vertex_resources(ini_path: &Path) -> HashMap<String, HashMap<Str
         }
     }
 
-    flush_override(&current_section, current_ib.take(), &current_vb_slots, &mut out);
+    flush_override(
+        &current_section,
+        current_ib.take(),
+        &current_vb_slots,
+        &mut out,
+    );
     out
 }
 
@@ -4143,7 +4277,10 @@ fn read_u32_indices(path: &Path, format: Option<&str>) -> Result<Vec<u32>, Strin
     Ok(indices)
 }
 
-fn read_position_normal_buffer(path: &Path, stride: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>), String> {
+fn read_position_normal_buffer(
+    path: &Path,
+    stride: usize,
+) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>), String> {
     if stride < 12 {
         return Err("Position buffer stride is too small".to_string());
     }
@@ -4155,15 +4292,39 @@ fn read_position_normal_buffer(path: &Path, stride: usize) -> Result<(Vec<[f32; 
 
     for i in 0..count {
         let base = i * stride;
-        let px = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid position buffer")?);
-        let py = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid position buffer")?);
-        let pz = f32::from_le_bytes(bytes[base + 8..base + 12].try_into().map_err(|_| "Invalid position buffer")?);
+        let px = f32::from_le_bytes(
+            bytes[base..base + 4]
+                .try_into()
+                .map_err(|_| "Invalid position buffer")?,
+        );
+        let py = f32::from_le_bytes(
+            bytes[base + 4..base + 8]
+                .try_into()
+                .map_err(|_| "Invalid position buffer")?,
+        );
+        let pz = f32::from_le_bytes(
+            bytes[base + 8..base + 12]
+                .try_into()
+                .map_err(|_| "Invalid position buffer")?,
+        );
         positions.push([px, py, pz]);
 
         if stride >= 24 {
-            let nx = f32::from_le_bytes(bytes[base + 12..base + 16].try_into().map_err(|_| "Invalid normal buffer")?);
-            let ny = f32::from_le_bytes(bytes[base + 16..base + 20].try_into().map_err(|_| "Invalid normal buffer")?);
-            let nz = f32::from_le_bytes(bytes[base + 20..base + 24].try_into().map_err(|_| "Invalid normal buffer")?);
+            let nx = f32::from_le_bytes(
+                bytes[base + 12..base + 16]
+                    .try_into()
+                    .map_err(|_| "Invalid normal buffer")?,
+            );
+            let ny = f32::from_le_bytes(
+                bytes[base + 16..base + 20]
+                    .try_into()
+                    .map_err(|_| "Invalid normal buffer")?,
+            );
+            let nz = f32::from_le_bytes(
+                bytes[base + 20..base + 24]
+                    .try_into()
+                    .map_err(|_| "Invalid normal buffer")?,
+            );
             normals.push([nx, ny, nz]);
         } else {
             normals.push([0.0, 1.0, 0.0]);
@@ -4204,8 +4365,16 @@ fn read_texcoord_buffer(path: &Path, stride: usize) -> Result<Vec<[f32; 2]>, Str
         let mut varying_pairs = 0i32;
         for i in 0..sample_count {
             let base = i * stride + cand;
-            let u = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid texcoord buffer")?);
-            let v = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid texcoord buffer")?);
+            let u = f32::from_le_bytes(
+                bytes[base..base + 4]
+                    .try_into()
+                    .map_err(|_| "Invalid texcoord buffer")?,
+            );
+            let v = f32::from_le_bytes(
+                bytes[base + 4..base + 8]
+                    .try_into()
+                    .map_err(|_| "Invalid texcoord buffer")?,
+            );
 
             if !u.is_finite() || !v.is_finite() {
                 valid = false;
@@ -4241,8 +4410,16 @@ fn read_texcoord_buffer(path: &Path, stride: usize) -> Result<Vec<[f32; 2]>, Str
     let mut uvs = Vec::with_capacity(count);
     for i in 0..count {
         let base = i * stride + chosen_offset;
-        let u = f32::from_le_bytes(bytes[base..base + 4].try_into().map_err(|_| "Invalid texcoord buffer")?);
-        let v = f32::from_le_bytes(bytes[base + 4..base + 8].try_into().map_err(|_| "Invalid texcoord buffer")?);
+        let u = f32::from_le_bytes(
+            bytes[base..base + 4]
+                .try_into()
+                .map_err(|_| "Invalid texcoord buffer")?,
+        );
+        let v = f32::from_le_bytes(
+            bytes[base + 4..base + 8]
+                .try_into()
+                .map_err(|_| "Invalid texcoord buffer")?,
+        );
         uvs.push([u, v]);
     }
     Ok(uvs)
@@ -4314,7 +4491,8 @@ fn best_resource_match(
         }
 
         match &best {
-            Some((best_score, best_name, _)) if score < *best_score || (score == *best_score && name > best_name) => {}
+            Some((best_score, best_name, _))
+                if score < *best_score || (score == *best_score && name > best_name) => {}
             _ => {
                 best = Some((score, name.clone(), info.clone()));
             }
@@ -4324,7 +4502,10 @@ fn best_resource_match(
     best.map(|(_, name, info)| (name, info))
 }
 
-fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Result<Option<PreviewMeshData>, String> {
+fn build_mod_binary_preview_mesh(
+    mod_root: &Path,
+    ini_path: Option<&Path>,
+) -> Result<Option<PreviewMeshData>, String> {
     let Some(ini_path) = ini_path else {
         return Ok(None);
     };
@@ -4344,7 +4525,11 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
         };
         let lower_file = filename.to_ascii_lowercase();
         let lower_name = name.to_ascii_lowercase();
-        let lower_format = info.format.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let lower_format = info
+            .format
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let looks_like_uint_index_format = lower_format.contains("r16_uint")
             || lower_format.contains("r32_uint")
             || lower_format.contains("dxgi_format_r16_uint")
@@ -4360,11 +4545,15 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
             ib_resources.push((name.clone(), info.clone()));
             continue;
         }
-        if lower_file.ends_with(".buf") && (lower_name.contains("position") || lower_file.contains("position")) {
+        if lower_file.ends_with(".buf")
+            && (lower_name.contains("position") || lower_file.contains("position"))
+        {
             position_resources.push((name.clone(), info.clone()));
             continue;
         }
-        if lower_file.ends_with(".buf") && (lower_name.contains("texcoord") || lower_file.contains("texcoord")) {
+        if lower_file.ends_with(".buf")
+            && (lower_name.contains("texcoord") || lower_file.contains("texcoord"))
+        {
             texcoord_resources.push((name.clone(), info.clone()));
         }
     }
@@ -4402,13 +4591,9 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
             })
         });
 
-        let Some((position_name, position_info)) = override_position.or_else(|| {
-            best_resource_match(
-                &resource_name,
-                &position_resources,
-                &["position"],
-            )
-        }) else {
+        let Some((position_name, position_info)) = override_position
+            .or_else(|| best_resource_match(&resource_name, &position_resources, &["position"]))
+        else {
             continue;
         };
 
@@ -4430,58 +4615,56 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
                 .to_ascii_lowercase()
         );
 
-        let (vertex_offset, vertex_count) = if let Some(existing) = loaded_position_groups.get(&group_key) {
-            *existing
-        } else {
-            let Some(pos_file) = position_info.filename.as_ref() else {
-                continue;
-            };
-            let pos_path = mod_root.join(pos_file);
-            if !pos_path.is_file() {
-                continue;
-            }
-
-            let pos_stride = position_info.stride.unwrap_or(40);
-            let (group_positions, group_normals) = read_position_normal_buffer(&pos_path, pos_stride)?;
-            if group_positions.len() < 3 {
-                continue;
-            }
-
-            let mut group_uvs = vec![[0.0_f32, 0.0_f32]; group_positions.len()];
-            let texcoord_choice = if let Some(override_name) = &override_texcoord_name {
-                texcoord_resources
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(override_name))
-                    .cloned()
+        let (vertex_offset, vertex_count) =
+            if let Some(existing) = loaded_position_groups.get(&group_key) {
+                *existing
             } else {
-                best_resource_match(
-                    &position_name,
-                    &texcoord_resources,
-                    &["texcoord"],
-                )
-            };
+                let Some(pos_file) = position_info.filename.as_ref() else {
+                    continue;
+                };
+                let pos_path = mod_root.join(pos_file);
+                if !pos_path.is_file() {
+                    continue;
+                }
 
-            if let Some((_, tex_info)) = texcoord_choice {
-                if let Some(tex_file) = tex_info.filename {
-                    let tex_path = mod_root.join(tex_file);
-                    if tex_path.is_file() {
-                        let tex_stride = tex_info.stride.unwrap_or(20);
-                        if let Ok(texcoords) = read_texcoord_buffer(&tex_path, tex_stride) {
-                            let copy_count = group_uvs.len().min(texcoords.len());
-                            group_uvs[..copy_count].copy_from_slice(&texcoords[..copy_count]);
+                let pos_stride = position_info.stride.unwrap_or(40);
+                let (group_positions, group_normals) =
+                    read_position_normal_buffer(&pos_path, pos_stride)?;
+                if group_positions.len() < 3 {
+                    continue;
+                }
+
+                let mut group_uvs = vec![[0.0_f32, 0.0_f32]; group_positions.len()];
+                let texcoord_choice = if let Some(override_name) = &override_texcoord_name {
+                    texcoord_resources
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(override_name))
+                        .cloned()
+                } else {
+                    best_resource_match(&position_name, &texcoord_resources, &["texcoord"])
+                };
+
+                if let Some((_, tex_info)) = texcoord_choice {
+                    if let Some(tex_file) = tex_info.filename {
+                        let tex_path = mod_root.join(tex_file);
+                        if tex_path.is_file() {
+                            let tex_stride = tex_info.stride.unwrap_or(20);
+                            if let Ok(texcoords) = read_texcoord_buffer(&tex_path, tex_stride) {
+                                let copy_count = group_uvs.len().min(texcoords.len());
+                                group_uvs[..copy_count].copy_from_slice(&texcoords[..copy_count]);
+                            }
                         }
                     }
                 }
-            }
 
-            let offset = positions.len() as u32;
-            let count = group_positions.len();
-            positions.extend(group_positions);
-            normals.extend(group_normals);
-            uvs.extend(group_uvs);
-            loaded_position_groups.insert(group_key, (offset, count));
-            (offset, count)
-        };
+                let offset = positions.len() as u32;
+                let count = group_positions.len();
+                positions.extend(group_positions);
+                normals.extend(group_normals);
+                uvs.extend(group_uvs);
+                loaded_position_groups.insert(group_key, (offset, count));
+                (offset, count)
+            };
 
         let Some(file_name) = info.filename else {
             continue;
@@ -4505,40 +4688,45 @@ fn build_mod_binary_preview_mesh(mod_root: &Path, ini_path: Option<&Path>) -> Re
             .cloned()
             .unwrap_or_default();
 
-        let mut append_range = |range_count: usize, range_start: usize, first_index_hint: Option<u32>| {
-            if range_start >= raw_indices.len() || range_count == 0 {
-                return;
-            }
-
-            let range_end = range_start.saturating_add(range_count).min(raw_indices.len());
-            let part_start = indices.len();
-            for tri in raw_indices[range_start..range_end].chunks_exact(3) {
-                let a = tri[0] as usize;
-                let b = tri[1] as usize;
-                let c = tri[2] as usize;
-                if a >= vertex_count || b >= vertex_count || c >= vertex_count {
-                    continue;
+        let mut append_range =
+            |range_count: usize, range_start: usize, first_index_hint: Option<u32>| {
+                if range_start >= raw_indices.len() || range_count == 0 {
+                    return;
                 }
-                indices.push(tri[0] + vertex_offset);
-                indices.push(tri[1] + vertex_offset);
-                indices.push(tri[2] + vertex_offset);
-            }
 
-            let part_count = indices.len().saturating_sub(part_start);
-            if part_count == 0 {
-                return;
-            }
+                let range_end = range_start
+                    .saturating_add(range_count)
+                    .min(raw_indices.len());
+                let part_start = indices.len();
+                for tri in raw_indices[range_start..range_end].chunks_exact(3) {
+                    let a = tri[0] as usize;
+                    let b = tri[1] as usize;
+                    let c = tri[2] as usize;
+                    if a >= vertex_count || b >= vertex_count || c >= vertex_count {
+                        continue;
+                    }
+                    indices.push(tri[0] + vertex_offset);
+                    indices.push(tri[1] + vertex_offset);
+                    indices.push(tri[2] + vertex_offset);
+                }
 
-            let first_index = first_index_hint.or_else(|| Some(range_start as u32));
-            let first_index_label = first_index.map(|value| format!("fi{value}")).unwrap_or_default();
-            parts.push(PreviewMeshPart {
-                name: format!("{}_{}_{}", resource_name, first_index_label, file_stem),
-                index_start: part_start,
-                index_count: part_count,
-                first_index,
-                ib_resource: Some(resource_name.clone()),
-            });
-        };
+                let part_count = indices.len().saturating_sub(part_start);
+                if part_count == 0 {
+                    return;
+                }
+
+                let first_index = first_index_hint.or_else(|| Some(range_start as u32));
+                let first_index_label = first_index
+                    .map(|value| format!("fi{value}"))
+                    .unwrap_or_default();
+                parts.push(PreviewMeshPart {
+                    name: format!("{}_{}_{}", resource_name, first_index_label, file_stem),
+                    index_start: part_start,
+                    index_count: part_count,
+                    first_index,
+                    ib_resource: Some(resource_name.clone()),
+                });
+            };
 
         if draw_ranges.is_empty() {
             append_range(
@@ -4602,8 +4790,14 @@ fn score_texture_for_part(part_name: &str, texture_path: &Path) -> i32 {
         }
     }
 
-    let part_hex: Vec<&String> = part_tokens.iter().filter(|token| looks_like_hex_token(token)).collect();
-    let file_hex: Vec<&String> = file_tokens.iter().filter(|token| looks_like_hex_token(token)).collect();
+    let part_hex: Vec<&String> = part_tokens
+        .iter()
+        .filter(|token| looks_like_hex_token(token))
+        .collect();
+    let file_hex: Vec<&String> = file_tokens
+        .iter()
+        .filter(|token| looks_like_hex_token(token))
+        .collect();
     for token in &part_hex {
         if file_hex.iter().any(|item| *item == *token) {
             score += 220;
@@ -4971,7 +5165,11 @@ fn build_dump_preview_mesh(dump_root: &Path) -> Result<Option<PreviewMeshData>, 
     }))
 }
 
-fn create_preview_glb_from_mesh(output_path: &Path, mesh: &PreviewMeshData, metadata: &Value) -> Result<(), String> {
+fn create_preview_glb_from_mesh(
+    output_path: &Path,
+    mesh: &PreviewMeshData,
+    metadata: &Value,
+) -> Result<(), String> {
     if mesh.positions.is_empty() || mesh.indices.is_empty() {
         return Err("Mesh data is empty".to_string());
     }
@@ -5191,7 +5389,9 @@ fn collect_path_tokens_recursive(dir: &Path, out: &mut Vec<String>) -> Result<()
 }
 
 fn contains_any_token(tokens: &[String], needles: &[&str]) -> bool {
-    tokens.iter().any(|token| needles.iter().any(|needle| token.contains(needle)))
+    tokens
+        .iter()
+        .any(|token| needles.iter().any(|needle| token.contains(needle)))
 }
 
 fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartSpec> {
@@ -5200,13 +5400,14 @@ fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartS
     let _ = collect_path_tokens_recursive(mod_root, &mut tokens);
 
     let mut parts = Vec::new();
-    let push_part = |parts: &mut Vec<PreviewPartSpec>, name: &str, translation: [f32; 3], scale: [f32; 3]| {
-        parts.push(PreviewPartSpec {
-            name: name.to_string(),
-            translation,
-            scale,
-        });
-    };
+    let push_part =
+        |parts: &mut Vec<PreviewPartSpec>, name: &str, translation: [f32; 3], scale: [f32; 3]| {
+            parts.push(PreviewPartSpec {
+                name: name.to_string(),
+                translation,
+                scale,
+            });
+        };
 
     if contains_any_token(&tokens, &["body", "torso", "dress"]) {
         push_part(&mut parts, "body", [0.0, 0.95, 0.0], [0.82, 1.12, 0.45]);
@@ -5214,7 +5415,10 @@ fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartS
     if contains_any_token(&tokens, &["dress", "skirt", "robe"]) {
         push_part(&mut parts, "dress", [0.0, 0.35, 0.0], [1.0, 1.28, 0.58]);
     }
-    if contains_any_token(&tokens, &["head", "face", "eyes", "mask", "bangs", "hair", "headpiece"]) {
+    if contains_any_token(
+        &tokens,
+        &["head", "face", "eyes", "mask", "bangs", "hair", "headpiece"],
+    ) {
         push_part(&mut parts, "head", [0.0, 1.78, 0.0], [0.48, 0.56, 0.48]);
     }
     if contains_any_token(&tokens, &["hair", "bangs"]) {
@@ -5224,7 +5428,12 @@ fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartS
         push_part(&mut parts, "bangs", [0.0, 1.73, 0.18], [0.56, 0.18, 0.10]);
     }
     if contains_any_token(&tokens, &["headpiece", "halo", "horn"]) {
-        push_part(&mut parts, "headpiece", [0.0, 2.08, 0.0], [0.56, 0.18, 0.56]);
+        push_part(
+            &mut parts,
+            "headpiece",
+            [0.0, 2.08, 0.0],
+            [0.56, 0.18, 0.56],
+        );
     }
     if contains_any_token(&tokens, &["mask"]) {
         push_part(&mut parts, "mask", [0.0, 1.63, 0.16], [0.34, 0.18, 0.08]);
@@ -5236,11 +5445,26 @@ fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartS
         push_part(&mut parts, "veil", [0.0, 1.48, -0.08], [0.95, 0.9, 0.08]);
     }
     if contains_any_token(&tokens, &["wing"]) {
-        push_part(&mut parts, "wing_left", [-1.02, 1.48, 0.08], [0.26, 0.78, 0.10]);
-        push_part(&mut parts, "wing_right", [1.02, 1.48, 0.08], [0.26, 0.78, 0.10]);
+        push_part(
+            &mut parts,
+            "wing_left",
+            [-1.02, 1.48, 0.08],
+            [0.26, 0.78, 0.10],
+        );
+        push_part(
+            &mut parts,
+            "wing_right",
+            [1.02, 1.48, 0.08],
+            [0.26, 0.78, 0.10],
+        );
     }
     if contains_any_token(&tokens, &["transparency", "transparent", "extra"]) {
-        push_part(&mut parts, "transparency", [0.0, 0.84, 0.20], [0.92, 1.1, 0.1]);
+        push_part(
+            &mut parts,
+            "transparency",
+            [0.0, 0.84, 0.20],
+            [0.92, 1.1, 0.1],
+        );
     }
 
     if parts.is_empty() {
@@ -5253,14 +5477,66 @@ fn discover_preview_parts(dump_root: &Path, mod_root: &Path) -> Vec<PreviewPartS
     parts
 }
 
-fn create_cube_mesh_glb(output_path: &Path, parts: &[PreviewPartSpec], metadata: &Value) -> Result<(), String> {
+fn create_cube_mesh_glb(
+    output_path: &Path,
+    parts: &[PreviewPartSpec],
+    metadata: &Value,
+) -> Result<(), String> {
     let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        ([0.0, 0.0, 1.0], [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]]),
-        ([0.0, 0.0, -1.0], [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]]),
-        ([1.0, 0.0, 0.0], [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]]),
-        ([-1.0, 0.0, 0.0], [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]]),
-        ([0.0, 1.0, 0.0], [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]]),
-        ([0.0, -1.0, 0.0], [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]]),
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [-0.5, -0.5, 0.5],
+                [0.5, -0.5, 0.5],
+                [0.5, 0.5, 0.5],
+                [-0.5, 0.5, 0.5],
+            ],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [
+                [0.5, -0.5, -0.5],
+                [-0.5, -0.5, -0.5],
+                [-0.5, 0.5, -0.5],
+                [0.5, 0.5, -0.5],
+            ],
+        ),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [0.5, -0.5, 0.5],
+                [0.5, -0.5, -0.5],
+                [0.5, 0.5, -0.5],
+                [0.5, 0.5, 0.5],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [-0.5, -0.5, -0.5],
+                [-0.5, -0.5, 0.5],
+                [-0.5, 0.5, 0.5],
+                [-0.5, 0.5, -0.5],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [-0.5, 0.5, 0.5],
+                [0.5, 0.5, 0.5],
+                [0.5, 0.5, -0.5],
+                [-0.5, 0.5, -0.5],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [-0.5, -0.5, -0.5],
+                [0.5, -0.5, -0.5],
+                [0.5, -0.5, 0.5],
+                [-0.5, -0.5, 0.5],
+            ],
+        ),
     ];
 
     let mut positions = Vec::new();
@@ -5410,8 +5686,8 @@ fn encode_texture_as_png(source_path: &Path) -> Result<Vec<u8>, String> {
     }
 
     let bytes = fs::read(source_path).map_err(|err| err.to_string())?;
-    let image = image::load_from_memory(&bytes)
-        .map_err(|err| format!("Failed to decode image: {err}"))?;
+    let image =
+        image::load_from_memory(&bytes).map_err(|err| format!("Failed to decode image: {err}"))?;
 
     let mut encoded_png = Vec::new();
     image
@@ -5478,6 +5754,73 @@ fn replace_dir_contents(src: &Path, dest: &Path) -> Result<(), String> {
     copy_dir_recursive(src, dest)
 }
 
+fn is_model_viewer_config_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.starts_with("config.") || name.starts_with("settings.")
+}
+
+fn remove_model_viewer_executables(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            remove_model_viewer_executables(&path)?;
+        } else if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_model_viewer_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    let has_viewer_executable = fs::read_dir(source)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let path = entry.path();
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+        });
+    if !has_viewer_executable {
+        return Err(format!(
+            "The model viewer update at {} does not contain an executable.",
+            source.display()
+        ));
+    }
+
+    remove_model_viewer_executables(destination)?;
+    copy_model_viewer_files(source, destination)
+}
+
+fn copy_model_viewer_files(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_model_viewer_files(&source_path, &destination_path)?;
+        } else if !(destination_path.is_file() && is_model_viewer_config_file(&source_path)) {
+            fs::copy(&source_path, &destination_path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_custom_fixes_scaffold(resources_dir: &Path) -> Result<(), String> {
     let custom_root = resources_dir.join(CUSTOM_FIXES_DIR_NAME);
     fs::create_dir_all(&custom_root).map_err(|err| err.to_string())?;
@@ -5495,6 +5838,10 @@ fn ensure_dev_app_scaffold(install_base: &Path) -> Result<(), String> {
     fs::create_dir_all(&app_root).map_err(|err| err.to_string())?;
     fs::create_dir_all(app_root.join("icon")).map_err(|err| err.to_string())?;
     fs::create_dir_all(app_root.join("all")).map_err(|err| err.to_string())?;
+    let icons_root = app_root.join("icons");
+    for game in ["genshin", "wuwa", "star rail", "zzz", "end"] {
+        fs::create_dir_all(icons_root.join(game)).map_err(|err| err.to_string())?;
+    }
 
     for game in STOCK_GAME_KEYS {
         fs::create_dir_all(app_root.join(game)).map_err(|err| err.to_string())?;
@@ -5509,7 +5856,8 @@ fn ensure_runtime_tools_scaffold(install_base: &Path) -> Result<(), String> {
 
     // Move/sync extractor binaries from bundled app paths so clean systems do
     // not require a separate 7-Zip installation.
-    let mut source_dirs: Vec<(PathBuf, bool)> = vec![(install_base.join("resources").join("tools"), true)];
+    let mut source_dirs: Vec<(PathBuf, bool)> =
+        vec![(install_base.join("resources").join("tools"), true)];
 
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
@@ -5677,9 +6025,11 @@ fn apply_dev_icon_to_main_window(app: &tauri::AppHandle) -> Result<Option<String
 
 #[cfg(target_os = "windows")]
 fn apply_dev_shortcut_icons(icon_path: &Path) -> Result<usize, String> {
-    let icon_native = local_path(icon_path).replace('"', "\"\"").replace('\'', "''");
-        let script = format!(
-                r#"
+    let icon_native = local_path(icon_path)
+        .replace('"', "\"\"")
+        .replace('\'', "''");
+    let script = format!(
+        r#"
 $icon='{icon_native}'
 $roots=@(
     (Join-Path $env:USERPROFILE 'Desktop'),
@@ -5708,7 +6058,7 @@ foreach($root in $roots) {{
 }}
 Write-Output $count
 "#
-        );
+    );
 
     let output = background_command("powershell")
         .args(["-NoProfile", "-Command", &script])
@@ -5729,7 +6079,9 @@ Write-Output $count
         .unwrap_or(0);
 
     let _ = background_command("ie4uinit.exe").args(["-show"]).status();
-    let _ = background_command("ie4uinit.exe").args(["-ClearIconCache"]).status();
+    let _ = background_command("ie4uinit.exe")
+        .args(["-ClearIconCache"])
+        .status();
 
     Ok(count)
 }
@@ -5763,8 +6115,7 @@ fn purge_downloaded_stock_fixes(resources_dir: &Path) -> Result<usize, String> {
     let mut removed_total = 0usize;
 
     for game in STOCK_GAME_KEYS {
-        let game_dir = resources_dir.join(game);
-        removed_total += clear_dir_contents(&game_dir)?;
+        removed_total += clear_dir_contents(&resources_dir.join(game))?;
     }
 
     Ok(removed_total)
@@ -5922,6 +6273,26 @@ fn sync_resources_with_cleanup(extracted_root: &Path, resources_dir: &Path) -> R
         .map(Path::to_path_buf)
         .unwrap_or_else(|| resources_dir.to_path_buf());
 
+    for entry in fs::read_dir(&payload_root).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let source = entry.path();
+        let is_character_catalog = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.starts_with("characters_") && name.ends_with(".json") && source.is_file()
+            })
+            .unwrap_or(false);
+        if is_character_catalog {
+            fs::copy(&source, resources_dir.join(entry.file_name())).map_err(|err| {
+                format!(
+                    "Could not update character catalog {}: {err}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+
     for icon_folder in ICON_DIR_CANDIDATES {
         let source_icons = payload_root.join(icon_folder);
         if source_icons.is_dir() {
@@ -5933,16 +6304,25 @@ fn sync_resources_with_cleanup(extracted_root: &Path, resources_dir: &Path) -> R
                 "icons"
             };
             let dest_icons = resources_dir.join(dest_name);
-            replace_dir_contents(&source_icons, &dest_icons)?;
+            copy_dir_recursive(&source_icons, &dest_icons)?;
             break;
         }
     }
 
-    for game in STOCK_GAME_KEYS {
-        let source_game = payload_root.join(game);
-        if source_game.is_dir() {
+    let stock_game_dirs = STOCK_GAME_KEYS
+        .into_iter()
+        .map(|game| (game, payload_root.join(game)))
+        .filter(|(_, path)| path.is_dir())
+        .collect::<Vec<_>>();
+    if !stock_game_dirs.is_empty() {
+        // Stock fixes live directly under each game; custom fixes are separate.
+        for game in STOCK_GAME_KEYS {
             let dest_game = resources_dir.join(game);
-            replace_dir_contents(&source_game, &dest_game)?;
+            if let Some((_, source_game)) = stock_game_dirs.iter().find(|(key, _)| *key == game) {
+                replace_dir_contents(source_game, &dest_game)?;
+            } else if dest_game.exists() {
+                fs::remove_dir_all(dest_game).map_err(|err| err.to_string())?;
+            }
         }
     }
 
@@ -5960,6 +6340,11 @@ fn sync_resources_with_cleanup(extracted_root: &Path, resources_dir: &Path) -> R
                 let _ = fs::copy(path, dest_tools.join(file_name));
             }
         }
+    }
+
+    let source_model_viewer = payload_root.join("model_viewer");
+    if source_model_viewer.is_dir() {
+        sync_model_viewer_directory(&source_model_viewer, &resources_dir.join("model_viewer"))?;
     }
 
     ensure_custom_fixes_scaffold(resources_dir)?;
@@ -6070,10 +6455,7 @@ fn strip_disabled_duplicate_prefix(name: &str) -> &str {
     let mut split = name.splitn(2, '_');
     let first = split.next().unwrap_or_default();
     let second = split.next();
-    if !first.is_empty()
-        && first.chars().all(|c| c.is_ascii_digit())
-        && second.is_some()
-    {
+    if !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) && second.is_some() {
         second.unwrap_or(name)
     } else {
         name
@@ -6253,13 +6635,20 @@ fn parse_master_swapkeys(content: &str) -> (HashMap<String, String>, HashMap<Str
 }
 
 #[tauri::command]
-fn sync_global_persist_for_mod(mod_path: String, game_mod_root: Option<String>) -> Result<usize, String> {
+fn sync_global_persist_for_mod(
+    mod_path: String,
+    game_mod_root: Option<String>,
+) -> Result<usize, String> {
     let mod_dir = PathBuf::from(&mod_path);
     if !mod_dir.is_dir() {
         return Err(format!("Mod folder not found: {mod_path}"));
     }
 
-    let mods_root = if let Some(raw_root) = game_mod_root.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+    let mods_root = if let Some(raw_root) = game_mod_root
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
         let root_path = PathBuf::from(raw_root);
         let is_mods = root_path
             .file_name()
@@ -6270,12 +6659,14 @@ fn sync_global_persist_for_mod(mod_path: String, game_mod_root: Option<String>) 
         if is_mods {
             root_path
         } else {
-            find_mods_root(&root_path)
-                .ok_or_else(|| "Could not resolve selected game Mods folder from mod root.".to_string())?
+            find_mods_root(&root_path).ok_or_else(|| {
+                "Could not resolve selected game Mods folder from mod root.".to_string()
+            })?
         }
     } else {
-        find_mods_root(&mod_dir)
-            .ok_or_else(|| "Could not find parent Mods folder from selected mod path.".to_string())?
+        find_mods_root(&mod_dir).ok_or_else(|| {
+            "Could not find parent Mods folder from selected mod path.".to_string()
+        })?
     };
     let mods_parent = mods_root
         .parent()
@@ -6311,8 +6702,8 @@ fn sync_global_persist_for_mod(mod_path: String, game_mod_root: Option<String>) 
 
         let raw = fs::read(&ini_path).map_err(|err| err.to_string())?;
         let content = String::from_utf8_lossy(&raw).into_owned();
-        let namespace = extract_namespace(&content)
-            .map(|ns| ns.replace(['\\', '/'], ".").to_ascii_lowercase());
+        let namespace =
+            extract_namespace(&content).map(|ns| ns.replace(['\\', '/'], ".").to_ascii_lowercase());
 
         let rel_file = ini_path
             .strip_prefix(&mods_root)
@@ -6673,7 +7064,9 @@ fn create_mod_folder_scaffold_internal(game: &str, mod_root: &str) -> Result<usi
         }
 
         if category.eq_ignore_ascii_case("characters") {
-            for entry in read_json_array(&resources_dir.join(format!("addedCharacters_{game}.json"))) {
+            for entry in
+                read_json_array(&resources_dir.join(format!("addedCharacters_{game}.json")))
+            {
                 if let Some(id) = extract_item_id(&entry) {
                     item_ids.insert(id);
                 }
@@ -6687,6 +7080,135 @@ fn create_mod_folder_scaffold_internal(game: &str, mod_root: &str) -> Result<usi
     }
 
     Ok(created)
+}
+
+fn read_character_ids(resources_dir: &Path, game: &str) -> Result<HashSet<String>, String> {
+    let builtin_path = resources_dir.join(format!("characters_{game}.json"));
+    let builtin_raw = fs::read_to_string(&builtin_path).map_err(|error| {
+        format!(
+            "Could not read the {game} character catalog at {}: {error}",
+            builtin_path.display()
+        )
+    })?;
+    let mut entries: Vec<Value> = serde_json::from_str(&builtin_raw).map_err(|error| {
+        format!(
+            "Could not parse the {game} character catalog at {}: {error}",
+            builtin_path.display()
+        )
+    })?;
+
+    let custom_path = resources_dir.join(format!("addedCharacters_{game}.json"));
+    match fs::read_to_string(&custom_path) {
+        Ok(raw) => {
+            let custom_entries: Vec<Value> = serde_json::from_str(&raw).map_err(|error| {
+                format!(
+                    "Could not parse the custom {game} character catalog at {}: {error}",
+                    custom_path.display()
+                )
+            })?;
+            entries.extend(custom_entries);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not read the custom {game} character catalog at {}: {error}",
+                custom_path.display()
+            ));
+        }
+    }
+
+    Ok(entries
+        .iter()
+        .filter_map(extract_item_id)
+        .map(|id| id.to_lowercase())
+        .collect())
+}
+
+fn cleanup_character_mod_folders(
+    mod_root: &Path,
+    valid_character_ids: &HashSet<String>,
+) -> Result<CharacterModCleanupResult, String> {
+    let characters_dir = mod_root.join("characters");
+    if !characters_dir.is_dir() {
+        return Err(format!(
+            "Character mod folder does not exist: {}",
+            characters_dir.display()
+        ));
+    }
+
+    let mut result = CharacterModCleanupResult {
+        moved: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    for entry in fs::read_dir(&characters_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let source = entry.path();
+        let folder_name = entry.file_name();
+        let Some(folder_id) = folder_name.to_str() else {
+            result.failures.push(format!(
+                "Could not read folder name at {}",
+                source.display()
+            ));
+            continue;
+        };
+        if valid_character_ids.contains(&folder_id.to_lowercase()) {
+            continue;
+        }
+
+        let destination = mod_root.join(&folder_name);
+        let destination = if destination.exists() {
+            let mut candidate = mod_root.join(format!("{folder_id}_moved"));
+            let mut index = 2;
+            while candidate.exists() {
+                candidate = mod_root.join(format!("{folder_id}_moved_{index}"));
+                index += 1;
+            }
+            candidate
+        } else {
+            destination
+        };
+
+        match fs::rename(&source, &destination) {
+            Ok(()) => result.moved.push(format!(
+                "characters\\{} -> {}",
+                folder_id,
+                destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(folder_id)
+            )),
+            Err(error) => result
+                .failures
+                .push(format!("Could not move {}: {error}", source.display())),
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn cleanup_character_mods(
+    game: String,
+    mod_root: String,
+) -> Result<CharacterModCleanupResult, String> {
+    if !STOCK_GAME_KEYS.contains(&game.as_str()) {
+        return Err(format!("Unsupported game: {game}"));
+    }
+    if mod_root.trim().is_empty() {
+        return Err("Mod root path is empty.".to_string());
+    }
+    let resources_dir = resolve_resources_dir()?;
+    let valid_character_ids = read_character_ids(&resources_dir, &game)?;
+    cleanup_character_mod_folders(Path::new(&mod_root), &valid_character_ids)
 }
 
 fn download_and_install_mod_blocking(
@@ -6750,6 +7272,91 @@ fn download_and_install_mod_blocking(
     result
 }
 
+fn has_installable_mod_files_recursive(dir: &Path) -> bool {
+    let entries = match fs::read_dir(dir) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_file() {
+            let is_preview_image = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    ["png", "jpg", "jpeg", "webp", "bmp", "gif"]
+                        .contains(&extension.to_ascii_lowercase().as_str())
+                })
+                && path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        ["preview", "previewimage", "thumbnail", "thumb", "cover"]
+                            .contains(&name.to_ascii_lowercase().as_str())
+                    });
+            if !is_preview_image {
+                return true;
+            }
+        }
+        if path.is_dir() && has_installable_mod_files_recursive(&path) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn validate_split_archive_parts(first_part: &Path) -> Result<(), String> {
+    let parent = first_part
+        .parent()
+        .ok_or_else(|| "Could not determine the split archive folder.".to_string())?;
+    let first_name = first_part
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Could not read the split archive filename.".to_string())?;
+    let (prefix, volume) = first_name
+        .rsplit_once('.')
+        .ok_or_else(|| "Select the first split archive volume ending in .001.".to_string())?;
+    if !volume.eq_ignore_ascii_case("001") {
+        return Err("Select the first split archive volume ending in .001.".to_string());
+    }
+    let second_part = parent.join(format!("{prefix}.002"));
+    if !second_part.is_file() {
+        return Err(format!(
+            "This is a split archive. Keep all numbered parts together and select its first part (.001). Missing: {}",
+            second_part.display()
+        ));
+    }
+
+    let mut highest_part = 2_u32;
+    for entry in fs::read_dir(parent).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(number) = name
+            .strip_prefix(&format!("{prefix}."))
+            .filter(|suffix| suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|suffix| suffix.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        highest_part = highest_part.max(number);
+    }
+
+    for part in 1..=highest_part {
+        let part_path = parent.join(format!("{prefix}.{part:03}"));
+        if !part_path.is_file() {
+            return Err(format!(
+                "This split archive is incomplete. Missing part: {}",
+                part_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn install_archive_mod_blocking(
     archive_path: String,
     dest_item_path: String,
@@ -6772,11 +7379,18 @@ fn install_archive_mod_blocking(
         .unwrap_or("zip")
         .to_lowercase();
     let ext = raw_ext;
+    if ext == "001" {
+        validate_split_archive_parts(&source_archive)?;
+    }
 
     let extract_dir = temp_root.join("extract");
     fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
 
-    fn run_external_extractor(program: &Path, archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+    fn run_external_extractor(
+        program: &Path,
+        archive: &Path,
+        out_dir: &Path,
+    ) -> Result<std::process::Output, String> {
         let program_str = program.to_string_lossy().to_string();
         background_command(&program_str)
             .args([
@@ -6789,22 +7403,22 @@ fn install_archive_mod_blocking(
             .map_err(|err| err.to_string())
     }
 
-    fn extraction_result_is_usable(output: &std::process::Output, out_dir: &Path) -> bool {
-        if output.status.success() {
-            return true;
-        }
-
-        // 7-Zip often returns 1 for warnings while still extracting usable files.
-        if output.status.code() == Some(1) {
-            if let Ok(mut entries) = fs::read_dir(out_dir) {
-                return entries.next().is_some();
-            }
-        }
-
-        false
+    fn extraction_result_is_usable(output: &std::process::Output, _out_dir: &Path) -> bool {
+        output.status.success()
     }
 
-    fn run_winrar_extractor(program: &Path, archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+    fn reset_extraction_dir(out_dir: &Path) -> Result<(), String> {
+        if out_dir.exists() {
+            fs::remove_dir_all(out_dir).map_err(|err| err.to_string())?;
+        }
+        fs::create_dir_all(out_dir).map_err(|err| err.to_string())
+    }
+
+    fn run_winrar_extractor(
+        program: &Path,
+        archive: &Path,
+        out_dir: &Path,
+    ) -> Result<std::process::Output, String> {
         let program_str = program.to_string_lossy().to_string();
         let mut out_arg = out_dir.to_string_lossy().to_string();
         if !out_arg.ends_with('\\') && !out_arg.ends_with('/') {
@@ -6822,25 +7436,15 @@ fn install_archive_mod_blocking(
             .map_err(|err| err.to_string())
     }
 
-    fn extract_with_7z_or_winrar(archive: &Path, out_dir: &Path) -> Result<std::process::Output, String> {
+    fn extract_with_7z_or_winrar(
+        archive: &Path,
+        out_dir: &Path,
+    ) -> Result<std::process::Output, String> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(|dir| dir.to_path_buf()));
 
-        let mut candidates: Vec<PathBuf> = vec![
-            PathBuf::from("7z"),
-            PathBuf::from("7z.exe"),
-            PathBuf::from("7zz"),
-            PathBuf::from("7zz.exe"),
-            PathBuf::from("7zr"),
-            PathBuf::from("7zr.exe"),
-            PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"),
-            PathBuf::from(r"C:\Program Files\7-Zip\7zz.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7zz.exe"),
-            PathBuf::from(r"C:\Program Files\WinRAR\UnRAR.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\WinRAR\UnRAR.exe"),
-        ];
+        let mut candidates: Vec<PathBuf> = Vec::new();
 
         if let Some(dir) = exe_dir {
             candidates.push(dir.join("7za.exe"));
@@ -6861,19 +7465,18 @@ fn install_archive_mod_blocking(
             candidates.push(dir.join("bin").join("7zr.exe"));
         }
 
-        let winrar_candidates = vec![
-            PathBuf::from(r"C:\Program Files\WinRAR\WinRAR.exe"),
-            PathBuf::from(r"C:\Program Files (x86)\WinRAR\WinRAR.exe"),
-        ];
-
-        candidates.extend(winrar_candidates.iter().cloned());
-
         // Discover extractors from PATH/custom installs.
-        for name in ["7z", "7z.exe", "7zz", "7zz.exe", "7zr", "7zr.exe", "UnRAR.exe", "WinRAR.exe"] {
-            if let Ok(output) = background_command("where")
-                .args([name])
-                .output()
-            {
+        for name in [
+            "7z",
+            "7z.exe",
+            "7zz",
+            "7zz.exe",
+            "7zr",
+            "7zr.exe",
+            "UnRAR.exe",
+            "WinRAR.exe",
+        ] {
+            if let Ok(output) = background_command("where").args([name]).output() {
                 if output.status.success() {
                     for line in String::from_utf8_lossy(&output.stdout).lines() {
                         let trimmed = line.trim();
@@ -6884,6 +7487,21 @@ fn install_archive_mod_blocking(
                 }
             }
         }
+
+        candidates.extend([
+            PathBuf::from(r"C:\Program Files\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files\7-Zip\7zz.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7z.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\7-Zip\7zz.exe"),
+            PathBuf::from(r"C:\Program Files\WinRAR\WinRAR.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\WinRAR\WinRAR.exe"),
+            PathBuf::from("7z"),
+            PathBuf::from("7z.exe"),
+            PathBuf::from("7zz"),
+            PathBuf::from("7zz.exe"),
+            PathBuf::from("7zr"),
+            PathBuf::from("7zr.exe"),
+        ]);
 
         let mut unique_candidates: Vec<PathBuf> = Vec::new();
         for candidate in candidates {
@@ -6896,6 +7514,7 @@ fn install_archive_mod_blocking(
         let mut last_output: Option<std::process::Output> = None;
 
         for candidate in unique_candidates {
+            reset_extraction_dir(out_dir)?;
             let is_winrar = candidate
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -6934,7 +7553,10 @@ fn install_archive_mod_blocking(
         }
 
         if saw_spawn_error {
-            Err("No archive extractor found (7-Zip/WinRAR). Install 7-Zip or add it to PATH.".to_string())
+            Err(
+                "No archive extractor found (7-Zip/WinRAR). Install 7-Zip or add it to PATH."
+                    .to_string(),
+            )
         } else {
             Err("No working archive extractor found.".to_string())
         }
@@ -6967,38 +7589,59 @@ fn install_archive_mod_blocking(
             .map_err(|err| format!("tar not available: {err}"))
     };
 
-    let extract_output = if ext == "zip" {
-        match run_expand_archive() {
-            Ok(output) if output.status.success() => output,
-            Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
-            _ => match run_tar_extract() {
-                Ok(output) if output.status.success() => output,
-                Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
-                _ => extract_with_7z_or_winrar(&source_archive, &extract_dir)
-                    .map_err(|err| format!("Extractor unavailable for zip archive: {err}"))?,
-            },
+    let extract_output = match extract_with_7z_or_winrar(&source_archive, &extract_dir) {
+        Ok(output) if output.status.success() => output,
+        result if ext == "001" => {
+            let detail = match result {
+                Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                Err(error) => error,
+            };
+            let _ = fs::remove_dir_all(&temp_root);
+            return Err(format!(
+                "Could not extract split archive '{}'. Install or update 7-Zip and select the .001 part. {}",
+                source_archive.display(),
+                detail
+            ));
         }
-    } else {
-        match run_tar_extract() {
-            Ok(output) if output.status.success() => output,
-            Ok(output) if extraction_result_is_usable(&output, &extract_dir) => output,
-            _ => match extract_with_7z_or_winrar(&source_archive, &extract_dir) {
-                Ok(output) => output,
-                Err(extract_err) => match run_expand_archive() {
-                    Ok(zip_output) => zip_output,
-                    Err(_) => {
-                        let _ = fs::remove_dir_all(&temp_root);
-                        return Err(format!(
-                            "Unsupported or unreadable archive '{}': {}. Bundle a 7za.exe at <install>/tools/7za.exe for maximum compatibility.",
-                            ext, extract_err
-                        ));
+        _ => {
+            reset_extraction_dir(&extract_dir)?;
+            let first_fallback = if ext == "zip" {
+                run_expand_archive()
+            } else {
+                run_tar_extract()
+            };
+            match first_fallback {
+                Ok(output) if output.status.success() => output,
+                _ => {
+                    reset_extraction_dir(&extract_dir)?;
+                    let second_fallback = if ext == "zip" {
+                        run_tar_extract()
+                    } else {
+                        run_expand_archive()
+                    };
+                    match second_fallback {
+                        Ok(output) if output.status.success() => output,
+                        Ok(output) => {
+                            let _ = fs::remove_dir_all(&temp_root);
+                            return Err(format!(
+                                "Extraction failed: {}",
+                                String::from_utf8_lossy(&output.stderr)
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = fs::remove_dir_all(&temp_root);
+                            return Err(format!(
+                                "Unsupported or unreadable archive '{}': {}",
+                                ext, error
+                            ));
+                        }
                     }
-                },
-            },
+                }
+            }
         }
     };
 
-    if !extract_output.status.success() && !extraction_result_is_usable(&extract_output, &extract_dir) {
+    if !extract_output.status.success() {
         let _ = fs::remove_dir_all(&temp_root);
         return Err(format!(
             "Extraction failed: {}",
@@ -7006,31 +7649,15 @@ fn install_archive_mod_blocking(
         ));
     }
 
-    fn has_any_files_recursive(dir: &Path) -> bool {
-        let entries = match fs::read_dir(dir) {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_file() {
-                return true;
-            }
-            if path.is_dir() && has_any_files_recursive(&path) {
-                return true;
-            }
-        }
-
-        false
-    }
-
     fn resolve_best_extract_source(root: &Path) -> PathBuf {
         let mut current = root.to_path_buf();
 
         loop {
             let entries = match fs::read_dir(&current) {
-                Ok(value) => value.filter_map(Result::ok).map(|e| e.path()).collect::<Vec<_>>(),
+                Ok(value) => value
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .collect::<Vec<_>>(),
                 Err(_) => break,
             };
 
@@ -7067,10 +7694,10 @@ fn install_archive_mod_blocking(
     }
 
     let source_path = resolve_best_extract_source(&extract_dir);
-    if !has_any_files_recursive(&source_path) {
+    if !has_installable_mod_files_recursive(&source_path) {
         let _ = fs::remove_dir_all(&temp_root);
         return Err(
-            "Archive extracted but contained no installable files. The source link may not be a direct archive download."
+            "Archive extracted but contained no mod files. The source link may not be a direct archive download."
                 .to_string(),
         );
     }
@@ -7179,19 +7806,14 @@ async fn install_local_archive_mod(
 ) -> Result<DownloadInstallResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let source_archive = archive_path.clone();
-        let installed = install_archive_mod_blocking(
-            archive_path,
-            dest_item_path,
-            mod_name,
-            preview_url,
-        )?;
+        let installed =
+            install_archive_mod_blocking(archive_path, dest_item_path, mod_name, preview_url)?;
         let _ = fs::remove_file(source_archive);
         Ok(installed)
     })
     .await
     .map_err(|err| err.to_string())?
 }
-
 
 #[tauri::command]
 fn open_in_explorer(path: String) -> Result<(), String> {
@@ -7262,11 +7884,8 @@ fn add_custom_character(game: String, id: String, name: String) -> Result<(), St
             .and_then(|paths| paths.get(&game))
             .and_then(Value::as_str)
         {
-            let target = build_item_folder_path(
-                &PathBuf::from(mod_root),
-                "characters",
-                Some(id.trim()),
-            );
+            let target =
+                build_item_folder_path(&PathBuf::from(mod_root), "characters", Some(id.trim()));
             let _ = fs::create_dir_all(target);
         }
     }
@@ -7319,12 +7938,19 @@ fn check_for_updates(force: bool) -> Result<Value, String> {
 
     let current_resources_version = settings
         .as_ref()
-        .and_then(|s| s.get("version").and_then(Value::as_str).map(ToOwned::to_owned))
+        .and_then(|s| {
+            s.get("version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| detect_resource_version(&resources_dir));
     // Prefer persisted installed release tag written by installer/updater.
     let current_app_version = settings
         .as_ref()
-        .and_then(|s| s.get("last_app_release_tag").or_else(|| s.get("last_release_tag")))
+        .and_then(|s| {
+            s.get("last_app_release_tag")
+                .or_else(|| s.get("last_release_tag"))
+        })
         .and_then(Value::as_str)
         .map(normalize_release_tag)
         .filter(|value| !value.is_empty())
@@ -7342,22 +7968,23 @@ fn check_for_updates(force: bool) -> Result<Value, String> {
     let app_release = match fetch_or_empty(APP_RELEASES_API) {
         Ok(v) => v,
         Err(e) if e == "rate_limit_exceeded" => {
-            return Err("Rate limit reached — update check will retry automatically in 1 hour.".to_string());
+            return Err(
+                "Rate limit reached — update check will retry automatically in 1 hour.".to_string(),
+            );
         }
         Err(e) => return Err(e),
     };
     let resources_release = match fetch_or_empty(RESOURCES_RELEASES_API) {
         Ok(v) => v,
         Err(e) if e == "rate_limit_exceeded" => {
-            return Err("Rate limit reached — update check will retry automatically in 1 hour.".to_string());
+            return Err(
+                "Rate limit reached — update check will retry automatically in 1 hour.".to_string(),
+            );
         }
         Err(e) => return Err(e),
     };
 
-    let latest_app_tag = app_release["tag_name"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let latest_app_tag = app_release["tag_name"].as_str().unwrap_or("").to_string();
     let latest_resources_tag = resources_release["tag_name"]
         .as_str()
         .unwrap_or("")
@@ -7410,6 +8037,8 @@ fn check_for_updates(force: bool) -> Result<Value, String> {
     let resources_url = extract_asset_url(&resources_release, "resources_m_m.zip");
     let exe_url = extract_app_exe_url(&app_release);
     let updater_url = extract_updater_exe_url(&app_release);
+    let app_release_notes = app_release["body"].as_str().unwrap_or("").trim();
+    let resources_release_notes = resources_release["body"].as_str().unwrap_or("").trim();
 
     let any_update_available = app_update_available || resources_update_available;
 
@@ -7424,6 +8053,8 @@ fn check_for_updates(force: bool) -> Result<Value, String> {
         "resources_update_available": resources_update_available,
         "resources_current_version": current_resources_version,
         "resources_latest_tag": latest_resources_tag,
+        "app_release_notes": app_release_notes,
+        "resources_release_notes": resources_release_notes,
         "exe_url": exe_url,
         "updater_url": updater_url,
     });
@@ -7558,13 +8189,17 @@ fn launch_local_updater(
 /// Save the latest app release tag to settings so the update prompt is not shown
 /// again after the manager relaunches following an update.
 #[tauri::command]
-fn mark_app_update_seen(latest_tag: String) -> Result<(), String> {
+fn mark_app_update_seen(latest_tag: String, release_notes: String) -> Result<(), String> {
     save_settings_metadata(|map| {
         let normalized = normalize_release_tag(&latest_tag);
         if !normalized.is_empty() {
             map.insert(
-                "last_app_release_tag".to_string(),
+                "pending_app_changelog_tag".to_string(),
                 serde_json::Value::String(normalized),
+            );
+            map.insert(
+                "pending_app_changelog_notes".to_string(),
+                serde_json::Value::String(release_notes),
             );
             map.remove("update_check_ts");
             map.remove("update_check_result");
@@ -7573,6 +8208,49 @@ fn mark_app_update_seen(latest_tag: String) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+#[tauri::command]
+fn consume_pending_app_changelog() -> Result<Option<Value>, String> {
+    let resources_dir = resolve_resources_dir()?;
+    let settings_path = resources_dir.join("settings.json");
+    if !settings_path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&settings_path).map_err(|err| err.to_string())?;
+    let mut settings = serde_json::from_str::<Value>(&raw).map_err(|err| err.to_string())?;
+    let Some(map) = settings.as_object_mut() else {
+        return Ok(None);
+    };
+
+    let pending_tag = map
+        .get("pending_app_changelog_tag")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let installed_tag = map
+        .get("last_app_release_tag")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if pending_tag.is_empty()
+        || normalize_release_tag(&pending_tag) != normalize_release_tag(&installed_tag)
+    {
+        return Ok(None);
+    }
+
+    let notes = map
+        .get("pending_app_changelog_notes")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    map.remove("pending_app_changelog_tag");
+    map.remove("pending_app_changelog_notes");
+    let body = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+    fs::write(&settings_path, body).map_err(|err| err.to_string())?;
+
+    Ok(Some(json!({ "tag": pending_tag, "notes": notes })))
 }
 
 #[tauri::command]
@@ -7753,7 +8431,10 @@ fn bootstrap_installation(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_else(|_| "0".to_string());
-        map.insert("resources_last_downloaded_at".to_string(), Value::String(downloaded_at));
+        map.insert(
+            "resources_last_downloaded_at".to_string(),
+            Value::String(downloaded_at),
+        );
 
         map.remove("update_check_ts");
         map.remove("update_check_result");
@@ -7821,10 +8502,108 @@ fn create_shortcut_from_settings(base_dir: Option<String>) -> Result<String, Str
     Ok(normalize_path(&shortcut_path))
 }
 
+#[cfg(windows)]
+fn update_migrated_shortcuts(target_exe: &Path, install_dir: &Path) -> Result<(), String> {
+    let user_profile = std::env::var("USERPROFILE").map_err(|err| err.to_string())?;
+    let appdata = std::env::var("APPDATA").map_err(|err| err.to_string())?;
+    let desktop = PathBuf::from(user_profile)
+        .join("Desktop")
+        .join("Mod Manager v2.lnk");
+    let start_menu = PathBuf::from(appdata)
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+        .join("mod-manager-v2")
+        .join("mod-manager-v2.lnk");
+
+    let escape_ps = |path: &Path| local_path(path).replace('\'', "''");
+    let script = format!(
+        "$shortcuts = @('{}','{}'); foreach ($path in $shortcuts) {{ $parent = Split-Path -Parent $path; New-Item -ItemType Directory -Force -Path $parent | Out-Null; $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($path); $shortcut.TargetPath = '{}'; $shortcut.WorkingDirectory = '{}'; $shortcut.Save() }}",
+        escape_ps(&desktop),
+        escape_ps(&start_menu),
+        escape_ps(target_exe),
+        escape_ps(install_dir),
+    );
+    let status = background_command("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .status()
+        .map_err(|err| err.to_string())?;
+    if !status.success() {
+        return Err("Failed to update desktop and Start Menu shortcuts.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn migrate_legacy_install(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        return Err("Installation migration is only supported on Windows.".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let source_exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let source_dir = source_exe
+            .parent()
+            .ok_or_else(|| "Could not determine the current installation folder.".to_string())?;
+        detect_legacy_install()
+            .filter(|install| {
+                normalize_path(Path::new(&install.base_dir))
+                    .eq_ignore_ascii_case(&normalize_path(source_dir))
+            })
+            .ok_or_else(|| {
+                "Could not find settings and resources beside this installation.".to_string()
+            })?;
+        let local_app_data =
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable.")?);
+        let target_dir = local_app_data.join("Programs").join("mod-manager-v2");
+        if normalize_path(source_dir).eq_ignore_ascii_case(&normalize_path(&target_dir)) {
+            return Err("Mod Manager is already installed in the per-user location.".to_string());
+        }
+        fs::create_dir_all(&target_dir).map_err(|err| err.to_string())?;
+
+        for folder in ["resources", "tools", "app"] {
+            let source = source_dir.join(folder);
+            if source.is_dir() {
+                copy_dir_recursive(&source, &target_dir.join(folder))?;
+            }
+        }
+        let target_exe = target_dir.join("mod-manager-v2.exe");
+        fs::copy(&source_exe, &target_exe).map_err(|err| err.to_string())?;
+        let source_updater = source_dir.join("updater.exe");
+        if source_updater.is_file() {
+            fs::copy(source_updater, target_dir.join("updater.exe"))
+                .map_err(|err| err.to_string())?;
+        }
+
+        let install_path = json!({ "install_path": normalize_path(&target_dir) });
+        fs::write(
+            target_dir.join("install_path.json"),
+            serde_json::to_string_pretty(&install_path).map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+        update_migrated_shortcuts(&target_exe, &target_dir)?;
+
+        Command::new(&target_exe)
+            .current_dir(&target_dir)
+            .spawn()
+            .map_err(|err| {
+                format!("Migration completed, but the new installation could not start: {err}")
+            })?;
+        app.exit(0);
+        Ok(normalize_path(&target_dir))
+    }
+}
+
 #[tauri::command]
 fn download_and_update_resources(
+    app: tauri::AppHandle,
     url: String,
     latest_tag: Option<String>,
+    release_notes: Option<String>,
     _updater_url: Option<String>,
 ) -> Result<String, String> {
     let resources_dir = resolve_resources_dir()?;
@@ -7836,7 +8615,6 @@ fn download_and_update_resources(
         .to_path_buf();
     ensure_dev_app_scaffold(&parent)?;
     ensure_runtime_tools_scaffold(&parent)?;
-
     let remove_stock_fixes_after_update = load_settings_snapshot()
         .ok()
         .and_then(|settings| {
@@ -7910,10 +8688,10 @@ fn download_and_update_resources(
     };
 
     // Replace stock resources with cleaned set while preserving user custom fixes.
+    model_viewer::close_model_viewer(app)?;
     sync_resources_with_cleanup(&source, &resources_dir)?;
-
     if remove_stock_fixes_after_update {
-        let _ = purge_downloaded_stock_fixes(&resources_dir)?;
+        purge_downloaded_stock_fixes(&resources_dir)?;
     }
 
     // Record installed resources update metadata in settings.json.
@@ -7928,6 +8706,12 @@ fn download_and_update_resources(
                 );
             }
         }
+        if let Some(notes) = release_notes.as_ref() {
+            map.insert(
+                "last_resources_release_notes".to_string(),
+                Value::String(notes.clone()),
+            );
+        }
 
         map.insert(
             "resources_last_download_url".to_string(),
@@ -7937,7 +8721,10 @@ fn download_and_update_resources(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_else(|_| "0".to_string());
-        map.insert("resources_last_downloaded_at".to_string(), Value::String(downloaded_at));
+        map.insert(
+            "resources_last_downloaded_at".to_string(),
+            Value::String(downloaded_at),
+        );
     });
 
     // Cleanup
@@ -7948,18 +8735,26 @@ fn download_and_update_resources(
 }
 
 #[tauri::command]
-fn resolve_dev_background_path(game: String, use_all_folder: bool) -> Result<Option<String>, String> {
+fn resolve_dev_background_path(
+    game: String,
+    use_all_folder: bool,
+) -> Result<Option<String>, String> {
     let install_base = resolve_best_dev_app_base()
         .or_else(resolve_install_base)
         .ok_or_else(|| "Unable to determine install directory".to_string())?;
 
     ensure_dev_app_scaffold(&install_base)?;
-    Ok(resolve_dev_background_candidate(&install_base, &game, use_all_folder)
-        .map(|path| normalize_path(&path)))
+    Ok(
+        resolve_dev_background_candidate(&install_base, &game, use_all_folder)
+            .map(|path| normalize_path(&path)),
+    )
 }
 
 #[tauri::command]
-fn resolve_dev_background_data_url(game: String, use_all_folder: bool) -> Result<Option<String>, String> {
+fn resolve_dev_background_data_url(
+    game: String,
+    use_all_folder: bool,
+) -> Result<Option<String>, String> {
     let install_base = resolve_best_dev_app_base()
         .or_else(resolve_install_base)
         .ok_or_else(|| "Unable to determine install directory".to_string())?;
@@ -7982,6 +8777,7 @@ fn apply_dev_window_icon(app: tauri::AppHandle) -> Result<Option<String>, String
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(model_viewer::ModelViewerState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -8065,6 +8861,7 @@ pub fn run() {
             download_file_to_folder,
             ensure_buffer_values_folders,
             create_mod_folder_scaffold,
+            cleanup_character_mods,
             create_missing_folders_all_paths,
             download_and_install_mod,
             install_local_archive_mod,
@@ -8073,19 +8870,319 @@ pub fn run() {
             sync_global_persist_for_mod,
             check_for_updates,
             download_and_update_resources,
+            consume_pending_app_changelog,
+            model_viewer::open_model_viewer,
+            model_viewer::position_model_viewer,
+            model_viewer::close_model_viewer,
             resolve_dev_background_path,
             download_and_launch_updater,
             launch_local_updater,
             mark_app_update_seen,
             exit_for_update,
             download_and_replace_updater,
-            bootstrap_installation
-            ,
+            bootstrap_installation,
             create_shortcut_from_settings,
+            migrate_legacy_install,
             build_preview_glb_from_dump,
             resolve_preview_texture_bindings,
             resolve_preview_active_first_indices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod character_mod_cleanup_tests {
+    use super::*;
+
+    fn create_test_mod_root() -> PathBuf {
+        let root = unique_temp_dir("character_mod_cleanup_test");
+        fs::create_dir_all(root.join("characters")).expect("create test characters directory");
+        root
+    }
+
+    #[test]
+    fn moves_all_non_character_folders_and_preserves_their_contents() {
+        let root = create_test_mod_root();
+        let characters = root.join("characters");
+        fs::create_dir_all(characters.join("ValidCharacter")).expect("create listed character");
+        fs::create_dir_all(characters.join("unknown_empty").join("empty_subfolder"))
+            .expect("create empty nested folder");
+        fs::create_dir_all(characters.join("unknown_with_mod").join("summer"))
+            .expect("create nested mod folder");
+        fs::write(
+            characters
+                .join("unknown_with_mod")
+                .join("summer")
+                .join("mod.INI"),
+            "[TextureOverrideTest]",
+        )
+        .expect("write mod INI");
+
+        let valid_ids = HashSet::from(["validcharacter".to_string()]);
+        let result = cleanup_character_mod_folders(&root, &valid_ids).expect("cleanup folders");
+
+        assert_eq!(result.moved.len(), 2);
+        assert!(result.failures.is_empty());
+        assert!(root.join("unknown_empty").join("empty_subfolder").is_dir());
+        assert!(characters.join("ValidCharacter").is_dir());
+        assert!(root
+            .join("unknown_with_mod")
+            .join("summer")
+            .join("mod.INI")
+            .is_file());
+        assert!(!characters.join("unknown_with_mod").exists());
+        assert!(!characters.join("unknown_empty").exists());
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn moves_to_a_unique_general_folder_when_destination_exists() {
+        let root = create_test_mod_root();
+        let source = root.join("characters").join("alpin");
+        fs::create_dir_all(&source).expect("create source folder");
+        fs::create_dir_all(root.join("alpin")).expect("create existing destination");
+        fs::write(root.join("alpin").join("keep.txt"), "keep").expect("write destination marker");
+
+        let result =
+            cleanup_character_mod_folders(&root, &HashSet::new()).expect("cleanup folders");
+
+        assert_eq!(result.moved, vec!["characters\\alpin -> alpin_moved"]);
+        assert!(result.failures.is_empty());
+        assert!(!source.exists());
+        assert!(root.join("alpin_moved").is_dir());
+        assert_eq!(
+            fs::read_to_string(root.join("alpin").join("keep.txt")).expect("read marker"),
+            "keep"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn custom_icons_are_resolved_before_stock_icons_by_character_id() {
+        let root = unique_temp_dir("custom_icon_priority_test");
+        let custom = root.join("app").join("icons").join("genshin");
+        let stock = root.join("resources").join("icons").join("gi_characters");
+        fs::create_dir_all(&custom).expect("create custom icon directory");
+        fs::create_dir_all(&stock).expect("create stock icon directory");
+        fs::write(custom.join("10000002.png"), "custom").expect("write custom icon");
+        fs::write(stock.join("10000002.png"), "stock").expect("write stock icon");
+
+        let icon = resolve_icon_path(
+            &[normalize_path(&custom), normalize_path(&stock)],
+            "10000002",
+        )
+        .expect("resolve custom icon");
+
+        assert_eq!(PathBuf::from(icon), custom.join("10000002.png"));
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn resources_update_replaces_stock_fixes_and_keeps_custom_fixes() {
+        let root = unique_temp_dir("stock_fix_resources_test");
+        let extracted = root.join("extracted");
+        let resources = root.join("resources");
+        fs::create_dir_all(&extracted).expect("create extracted resources root");
+        fs::create_dir_all(&resources).expect("create installed resources root");
+        fs::write(
+            extracted.join("characters_gi.json"),
+            r#"[{"id":"new-character"}]"#,
+        )
+        .expect("write incoming character catalog");
+        fs::write(
+            resources.join("characters_gi.json"),
+            r#"[{"id":"old-character"}]"#,
+        )
+        .expect("write installed character catalog");
+        fs::create_dir_all(extracted.join("gi").join("new-fix")).expect("create new stock fix");
+        fs::create_dir_all(resources.join("gi").join("removed-fix")).expect("create old stock fix");
+        fs::create_dir_all(resources.join("hsr").join("removed-game-fix"))
+            .expect("create stock fix for omitted game");
+        fs::create_dir_all(
+            resources
+                .join(CUSTOM_FIXES_DIR_NAME)
+                .join("gi")
+                .join("nested")
+                .join("custom-fix"),
+        )
+        .expect("create nested custom fix");
+        fs::write(extracted.join("gi").join("new-fix").join("fix.ini"), "new")
+            .expect("write new stock fix");
+        fs::write(
+            resources.join("gi").join("removed-fix").join("old.ini"),
+            "old",
+        )
+        .expect("write old stock fix");
+        fs::write(
+            resources
+                .join(CUSTOM_FIXES_DIR_NAME)
+                .join("gi")
+                .join("nested")
+                .join("custom-fix")
+                .join("custom.ini"),
+            "custom",
+        )
+        .expect("write custom fix");
+
+        sync_resources_with_cleanup(&extracted, &resources).expect("sync resources");
+
+        assert_eq!(
+            fs::read_to_string(resources.join("characters_gi.json"))
+                .expect("read updated character catalog"),
+            r#"[{"id":"new-character"}]"#
+        );
+        assert!(resources
+            .join("gi")
+            .join("new-fix")
+            .join("fix.ini")
+            .is_file());
+        assert!(!resources.join("gi").join("removed-fix").exists());
+        assert!(!resources.join("hsr").exists());
+        assert!(resources
+            .join(CUSTOM_FIXES_DIR_NAME)
+            .join("gi")
+            .join("nested")
+            .join("custom-fix")
+            .join("custom.ini")
+            .is_file());
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn optional_stock_fix_cleanup_keeps_custom_fixes() {
+        let root = unique_temp_dir("stock_fix_cleanup_test");
+        fs::create_dir_all(root.join("gi").join("stock")).expect("create stock fix");
+        fs::create_dir_all(
+            root.join(CUSTOM_FIXES_DIR_NAME)
+                .join("gi")
+                .join("nested")
+                .join("custom"),
+        )
+        .expect("create custom fix");
+        fs::write(root.join("gi").join("stock").join("fix.ini"), "stock").expect("write stock fix");
+        let custom_fix = root
+            .join(CUSTOM_FIXES_DIR_NAME)
+            .join("gi")
+            .join("nested")
+            .join("custom")
+            .join("fix.ini");
+        fs::write(&custom_fix, "custom").expect("write custom fix");
+
+        assert!(purge_downloaded_stock_fixes(&root).expect("purge stock fixes") > 0);
+
+        assert!(root.join("gi").is_dir());
+        assert!(fs::read_dir(root.join("gi"))
+            .expect("read stock game directory")
+            .next()
+            .is_none());
+        assert!(custom_fix.is_file());
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn preview_only_download_is_not_installable() {
+        let root = unique_temp_dir("preview_only_archive_test");
+        fs::create_dir_all(&root).expect("create extracted archive directory");
+        fs::write(root.join("preview.jpg"), "image").expect("write preview image");
+        assert!(!has_installable_mod_files_recursive(&root));
+        fs::write(root.join("mod.ini"), "mod").expect("write mod file");
+        assert!(has_installable_mod_files_recursive(&root));
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn split_archive_parts_require_complete_numbered_volumes() {
+        let root = unique_temp_dir("split_archive_test");
+        fs::create_dir_all(&root).expect("create split archive directory");
+        let first = root.join("mod.7z.001");
+        fs::write(&first, "part one").expect("write first volume");
+        assert!(validate_split_archive_parts(&first).is_err());
+
+        fs::write(root.join("mod.7z.002"), "part two").expect("write second volume");
+        assert!(validate_split_archive_parts(&first).is_ok());
+
+        fs::write(root.join("mod.7z.004"), "part four").expect("write fourth volume");
+        assert!(validate_split_archive_parts(&first).is_err());
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn resources_update_replaces_the_model_viewer_directory() {
+        let root = unique_temp_dir("model_viewer_resources_test");
+        let extracted = root.join("extracted");
+        let resources = root.join("resources");
+        fs::create_dir_all(extracted.join("model_viewer"))
+            .expect("create extracted model viewer directory");
+        fs::create_dir_all(resources.join("model_viewer"))
+            .expect("create installed model viewer directory");
+        fs::write(extracted.join("bundle-note.txt"), "resources payload")
+            .expect("write resources marker");
+        fs::write(
+            extracted.join("model_viewer").join("3DMigotoModViewer.exe"),
+            "new viewer",
+        )
+        .expect("write new viewer executable");
+        fs::write(
+            extracted.join("model_viewer").join("config.ini"),
+            "default config",
+        )
+        .expect("write packaged viewer config");
+        fs::write(
+            resources.join("model_viewer").join("old-viewer.exe"),
+            "old viewer",
+        )
+        .expect("write old viewer executable");
+        fs::write(
+            resources.join("model_viewer").join("config.ini"),
+            "user config",
+        )
+        .expect("write existing viewer config");
+
+        sync_resources_with_cleanup(&extracted, &resources).expect("sync resources");
+
+        assert_eq!(
+            fs::read_to_string(resources.join("model_viewer").join("3DMigotoModViewer.exe"))
+                .expect("read installed viewer"),
+            "new viewer"
+        );
+        assert!(!resources
+            .join("model_viewer")
+            .join("old-viewer.exe")
+            .exists());
+        assert_eq!(
+            fs::read_to_string(resources.join("model_viewer").join("config.ini"))
+                .expect("read preserved viewer config"),
+            "user config"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn resources_update_overwrites_incoming_icons_and_keeps_others() {
+        let root = unique_temp_dir("icon_resources_merge_test");
+        let extracted = root.join("extracted");
+        let resources = root.join("resources");
+        let source_icons = extracted.join("icons").join("gi_characters");
+        let installed_icons = resources.join("icons").join("gi_characters");
+        fs::create_dir_all(&source_icons).expect("create extracted icon directory");
+        fs::create_dir_all(&installed_icons).expect("create installed icon directory");
+        fs::write(source_icons.join("10000002.png"), "updated icon").expect("write incoming icon");
+        fs::write(installed_icons.join("10000002.png"), "old icon").expect("write existing icon");
+        fs::write(installed_icons.join("10000003.png"), "retained icon")
+            .expect("write icon absent from update");
+
+        sync_resources_with_cleanup(&extracted, &resources).expect("sync resources");
+
+        assert_eq!(
+            fs::read_to_string(installed_icons.join("10000002.png"))
+                .expect("read overwritten icon"),
+            "updated icon"
+        );
+        assert_eq!(
+            fs::read_to_string(installed_icons.join("10000003.png")).expect("read retained icon"),
+            "retained icon"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
 }

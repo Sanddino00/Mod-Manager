@@ -45,7 +45,10 @@ function deriveNameFromUrl(url: string, fallback = "download"): string {
 }
 
 function deriveModName(fileName: string): string {
-  return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
+  return fileName
+    .replace(/\.(?:zip|7z|rar)?\.001$/iu, "")
+    .replace(/\.[A-Za-z0-9]{1,8}$/u, "")
+    .trim() || "Imported Mod";
 }
 
 // Discord is embedded like a real browser tab (via Rust, not the JS Webview API) so its own
@@ -140,7 +143,7 @@ export function DiscordTab({ rememberWebSessions = true, gameModRoot, onDownload
       directory: false,
       title: "Select downloaded archive",
       defaultPath: downloadsFolder,
-      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar"] }],
+      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar", "001"] }],
     });
 
     if (!picked) {
@@ -614,4 +617,3 @@ export function DiscordTab({ rememberWebSessions = true, gameModRoot, onDownload
     </section>
   );
 }
-

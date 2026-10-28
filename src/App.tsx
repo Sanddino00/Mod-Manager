@@ -35,7 +35,7 @@ import type { DownloadEventPayload } from "./BrowseTab";
 import { ArcaTab } from "./ArcaTab";
 import { DiscordTab } from "./DiscordTab";
 import { GameBananaWebTab } from "./GameBananaWebTab";
-import { ModelPreviewTab } from "./ModelPreviewTab";
+import { ModelViewerTab } from "./ModelViewerTab";
 import { NextcloudTab } from "./NextcloudTab";
 import type {
   BootstrapState,
@@ -415,6 +415,7 @@ function extractGameBananaFiles(payload: unknown): {
   url: string;
   preview: string | null;
   isMain: boolean;
+  isArchive: boolean;
 }[] {
   if (!payload || typeof payload !== "object") {
     return [];
@@ -436,17 +437,25 @@ function extractGameBananaFiles(payload: unknown): {
       const description = ((file._sDescription as string) || "").toLowerCase();
       const type = ((file._sType as string) || "").toLowerCase();
 
+      const name = ((file._sFile as string) || (file._sName as string) || "download").trim();
+      const extensionSource = /\.[^./\\]+$/.test(name) ? name : url.split(/[?#]/, 1)[0];
+      const extension = extensionSource
+        .split(".")
+        .pop()
+        ?.toLowerCase();
+
       return {
-        name: (file._sFile as string) || (file._sName as string) || "download",
+        name,
         url,
         preview: previewUrl,
-        isMain: description.includes("main file") || type.includes("main"),
+        isMain: /^main(?:\b|[,])/i.test(description.trim()) || type.includes("main"),
+        isArchive: ["zip", "7z", "rar", "tar", "gz"].includes(extension ?? ""),
       };
     });
 }
 
 function App() {
-  type PrimaryTab = "manager" | "browse" | "downloads" | "modding-sites" | "discord" | "nextcloud-side" | "model-preview" | "fixes" | "settings";
+  type PrimaryTab = "manager" | "browse" | "downloads" | "modding-sites" | "discord" | "nextcloud-side" | "model-viewer" | "fixes" | "settings";
   type ModdingSiteTab = "gbweb" | "arca" | "nextcloud";
 
   const [state, setState] = useState<BootstrapState | null>(null);
@@ -514,7 +523,10 @@ function App() {
     resources_url: string | null;
     exe_url: string | null;
     updater_url: string | null;
+    app_release_notes?: string;
+    resources_release_notes?: string;
   } | null>(null);
+  const [changelog, setChangelog] = useState<{ title: string; tag: string; notes: string } | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateDownloading, setUpdateDownloading] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
@@ -522,6 +534,8 @@ function App() {
   const [managerCharacterView, setManagerCharacterView] = useState<"grid" | "workspace">("grid");
   const [downloadRecords, setDownloadRecords] = useState<DownloadRecord[]>([]);
   const [lastDownloadFolder, setLastDownloadFolder] = useState<string | null>(null);
+  const [installingDownloadedFile, setInstallingDownloadedFile] = useState(false);
+  const [downloadInstallError, setDownloadInstallError] = useState<string | null>(null);
 
   useEffect(() => {
     void invoke<DownloadRecord[]>("load_download_log")
@@ -535,7 +549,6 @@ function App() {
   const [devBackgroundPath, setDevBackgroundPath] = useState<string | null>(null);
   const [devBackgroundDataUrl, setDevBackgroundDataUrl] = useState<string | null>(null);
   const [devIconStatus, setDevIconStatus] = useState<string | null>(null);
-  const [modelPreviewPath, setModelPreviewPath] = useState("");
 
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [dragDropMsg, setDragDropMsg] = useState<string | null>(null);
@@ -553,11 +566,6 @@ function App() {
   const rememberWebSessions = Boolean(draftSettings?.remember_web_sessions ?? persistedSettings?.remember_web_sessions ?? true);
   const enableLoginHelperHints = Boolean(draftSettings?.enable_login_helper_hints ?? persistedSettings?.enable_login_helper_hints ?? true);
   const enableWebAdblocker = Boolean(draftSettings?.enable_web_adblocker ?? persistedSettings?.enable_web_adblocker ?? true);
-  const removeDownloadedStockFixesAfterUpdate = Boolean(
-    draftSettings?.remove_downloaded_stock_fixes_after_update
-      ?? persistedSettings?.remove_downloaded_stock_fixes_after_update
-      ?? false,
-  );
   const showNextcloudTabs = Boolean(draftSettings?.show_nextcloud_tabs ?? persistedSettings?.show_nextcloud_tabs ?? true);
   const showDiscordTab = Boolean(draftSettings?.show_discord_tab ?? persistedSettings?.show_discord_tab ?? true);
   const showModdingSidesTab = Boolean(draftSettings?.show_modding_sides_tab ?? persistedSettings?.show_modding_sides_tab ?? true);
@@ -566,15 +574,19 @@ function App() {
   const arcaSavedUsername = (draftSettings?.arca_saved_username ?? persistedSettings?.arca_saved_username ?? "").trim();
   const arcaSavedPassword = draftSettings?.arca_saved_password ?? persistedSettings?.arca_saved_password ?? "";
   const devModeEnabled = Boolean(draftSettings?.dev_mode ?? persistedSettings?.dev_mode ?? false);
+  const removeDownloadedStockFixesAfterUpdate = Boolean(
+    draftSettings?.remove_downloaded_stock_fixes_after_update
+      ?? persistedSettings?.remove_downloaded_stock_fixes_after_update
+      ?? false,
+  );
+  const showInstallRepairSetup = Boolean(draftSettings?.dev_show_install_repair ?? false);
+  const canMigrateLegacyInstall = Boolean(state?.can_migrate_install);
   const devUseImageBackground = Boolean(
     draftSettings?.dev_use_image_background ?? persistedSettings?.dev_use_image_background ?? false,
   );
   const devUseAllBackgrounds = Boolean(
     draftSettings?.dev_use_all_backgrounds ?? persistedSettings?.dev_use_all_backgrounds ?? false,
   );
-  const showModelPreviewTab = Boolean(
-    draftSettings?.dev_enable_model_preview_tab ?? persistedSettings?.dev_enable_model_preview_tab ?? false,
-  ) && devModeEnabled;
   const language = normalizeLanguage(draftSettings?.language ?? persistedSettings?.language);
   const modSortOrder = draftSettings?.mod_sort_order ?? persistedSettings?.mod_sort_order ?? "name";
   const L = language === "de"
@@ -584,13 +596,25 @@ function App() {
         moddingSides: "Modding-Seiten",
         discord: "Discord",
         cloudSide: "Cloud Side",
-        modelPreview: "Modellvorschau",
+        modelViewer: "Modell-Viewer",
         fixManager: "Fix-Manager",
         settings: "Einstellungen",
         refreshState: "Status aktualisieren",
         saveSettings: "Einstellungen speichern",
         createMissingFolders: "Fehlende Ordner erstellen",
+        cleanCharacterMods: "Charakter-Mod-Ordner bereinigen",
+        cleaningCharacterFolders: "Charakter-Ordner werden bereinigt...",
+        noConfiguredModFolder: "Für dieses Spiel ist kein Mod-Ordner konfiguriert.",
         installRepairSetup: "Setup installieren/reparieren",
+        migrateInstall: "Installation verschieben",
+        migrateInstallDescription: "Verschiebt Mod Manager aus einem benutzerdefinierten Installationsordner nach LocalAppData und aktualisiert die Verknüpfungen.",
+        migrateInstallConfirm: "Mod Manager nach LocalAppData\\Programs verschieben? Einstellungen, Ressourcen und benutzerdefinierte Fixes werden übernommen. Die Verknüpfungen werden aktualisiert und die App anschließend neu gestartet.",
+        removeStockFixes: "Stock-Fixes nach Ressourcen-Update entfernen (benutzerdefinierte Fixes behalten)",
+        fixLaunchDescription: "Launch startet den Fix in einem eigenen Fenster aus dem Ressourcenordner. Run startet ihn in einem eigenen Fenster mit dem ausgewählten Ordner als Arbeitsverzeichnis. Tools mit eigener Ordnerauswahl können Runs Arbeitsverzeichnis ignorieren.",
+        runInConsole: "In einem separaten Konsolenfenster gestartet.",
+        runAsGui: "Als GUI im ausgewählten Ordner gestartet.",
+        launchExternally: "Als separates Fenster gestartet.",
+        installDownloadedFile: "Heruntergeladene Datei installieren",
         createShortcut: "Verknüpfung erstellen",
         timeAdded: "Hinzugefügt",
         sort: "Sortierung",
@@ -610,16 +634,15 @@ function App() {
         rememberSessions: "Web-Sitzungen/Login-Cookies merken (schnelleres Einloggen)",
         loginHints: "Login-Hinweise in Web-Tabs aktivieren",
         adblock: "Integrierte Basis-Werbe- und Tracker-Blockierung für Web-Tabs aktivieren",
-        removeStockFixes: "Nach einem Ressourcen-Update heruntergeladene Stock-Fixes löschen (nur benutzerdefinierte Fixes)",
         showModdingTabs: "Modding-Seiten-Tab anzeigen",
         showDiscord: "Discord-Tab anzeigen",
         showCloudTabs: "Cloud-Tabs anzeigen (Public Share + Cloud-Seite)",
         quickLoginSave: "Schnellspeicher für Logins (Arca + GameBanana)",
         quickLoginDesc: "Speichert Zugangsdaten lokal in den Einstellungen für schnelles Autofill in den integrierten Browser-Tabs.",
         devModeSection: "Entwicklermodus",
-        modelPreviewToggle: "Modellvorschau-Tab aktivieren (experimenteller GLB-Viewer)",
         useImageBg: "Bildhintergrund verwenden (Bild vs. normal umschalten)",
         useAllBg: "app/all-Hintergründe für alle Spiele nutzen (aus = pro Spiel ein Ordner)",
+        showInstallRepair: "Setup installieren/reparieren anzeigen",
       }
     : {
         modBrowser: "Mod-Browser",
@@ -627,13 +650,25 @@ function App() {
         moddingSides: "Modding Sides",
         discord: "Discord",
         cloudSide: "Cloud Side",
-        modelPreview: "Model Preview",
+        modelViewer: "Model Viewer",
         fixManager: "Fix Manager",
         settings: "Settings",
         refreshState: "Refresh state",
         saveSettings: "Save Settings",
         createMissingFolders: "Create Missing Folders",
+        cleanCharacterMods: "Clean character mod folders",
+        cleaningCharacterFolders: "Cleaning character folders...",
+        noConfiguredModFolder: "No mod folder is configured for this game.",
         installRepairSetup: "Install/Repair Setup",
+        migrateInstall: "Move Installation",
+        migrateInstallDescription: "Moves Mod Manager from a custom installation folder to LocalAppData and updates its shortcuts.",
+        migrateInstallConfirm: "Move Mod Manager to LocalAppData\\Programs? Settings, resources, and custom fixes will be copied. Shortcuts will be updated and the app will restart.",
+        removeStockFixes: "Remove stock fixes after resources update (keep custom fixes)",
+        fixLaunchDescription: "Launch starts the fix in its own window from the resources folder. Run starts it in its own window with the selected folder as its working directory. Tools with their own folder picker may ignore Run's working directory.",
+        runInConsole: "Started in a separate console window.",
+        runAsGui: "Started as a GUI in the selected folder.",
+        launchExternally: "Started as a standalone window.",
+        installDownloadedFile: "Install Downloaded File",
         createShortcut: "Create Shortcut",
         timeAdded: "Time added",
         sort: "Sort",
@@ -653,16 +688,15 @@ function App() {
         rememberSessions: "Remember web sessions/login cookies (faster sign-in)",
         loginHints: "Enable login helper hints in web tabs",
         adblock: "Enable built-in basic ad/tracker blocking for web tabs",
-        removeStockFixes: "After resources update, delete downloaded stock fixes (custom fixes only)",
         showModdingTabs: "Show Modding Sides tab",
         showDiscord: "Show Discord tab",
         showCloudTabs: "Show Cloud tabs (public share + side)",
         quickLoginSave: "Quick Login Save (Arca + GameBanana)",
         quickLoginDesc: "Stores credentials locally in settings for quick autofill in the in-app browser tabs.",
         devModeSection: "Developer Mode",
-        modelPreviewToggle: "Enable Model Preview tab (experimental GLB viewer)",
         useImageBg: "Use image background (toggle image vs normal)",
         useAllBg: "Use app/all backgrounds for all games (off = per-game folders)",
+        showInstallRepair: "Show Install/Repair Setup",
       };
   const highlightedGame = activeGame ?? persistedSettings?.last_selected_game ?? "gi";
   const highlightedGameConfig = GAMES[highlightedGame];
@@ -812,11 +846,7 @@ function App() {
       setActiveTab("manager");
       return;
     }
-    if (activeTab === "model-preview" && !showModelPreviewTab) {
-      setActiveTab("manager");
-      return;
-    }
-  }, [activeTab, showDiscordTab, showModdingSidesTab, showNextcloudTabs, showModelPreviewTab]);
+  }, [activeTab, showDiscordTab, showModdingSidesTab, showNextcloudTabs]);
 
   useEffect(() => {
     if (!showNextcloudTabs && activeModdingSiteTab === "nextcloud") {
@@ -1017,6 +1047,14 @@ function App() {
 
     try {
       const nextState = await invoke<BootstrapState>("load_bootstrap_state");
+      const pendingChangelog = await invoke<{ tag: string; notes: string } | null>("consume_pending_app_changelog");
+      if (pendingChangelog) {
+        setChangelog({
+          title: "App update",
+          tag: pendingChangelog.tag,
+          notes: pendingChangelog.notes,
+        });
+      }
       const nextGame = nextState.settings.last_selected_game;
       setState(nextState);
       setDraftSettings(nextState.settings);
@@ -1115,7 +1153,8 @@ function App() {
     try {
       const payload = await fetchGameBananaJson(`Mod/${modId}/ProfilePage`);
       const files = extractGameBananaFiles(payload);
-      const file = files.find((entry) => entry.isMain) ?? files[0];
+      const file = files.find((entry) => entry.isMain && entry.isArchive)
+        ?? files.find((entry) => entry.isArchive);
 
       if (!file?.url) {
         throw new Error("No downloadable file was found on the RabbitFX page.");
@@ -1222,7 +1261,8 @@ function App() {
 
       const payload = await fetchGameBananaJson(`Mod/${texfxModId}/ProfilePage`);
       const files = extractGameBananaFiles(payload);
-      const mainFile = files.find((entry) => entry.isMain) ?? files[0];
+      const mainFile = files.find((entry) => entry.isMain && entry.isArchive)
+        ?? files.find((entry) => entry.isArchive);
       if (!mainFile?.url) {
         throw new Error("No downloadable TexFx file was found.");
       }
@@ -1985,6 +2025,110 @@ function App() {
     }
   }
 
+  async function handleMigrateLegacyInstall() {
+    if (!window.confirm(L.migrateInstallConfirm)) return;
+
+    setSavingSettings(true);
+    setSaveMessage(null);
+    try {
+      if (draftSettings) {
+        await invoke<string>("save_legacy_settings", {
+          baseDir: state?.legacy_install?.base_dir ?? null,
+          settings: draftSettings,
+        });
+      }
+      const target = await invoke<string>("migrate_legacy_install");
+      setSaveMessage(`Installation moved to ${target}. Restarting from the new location...`);
+    } catch (err) {
+      setSaveMessage(`Migration failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
+  async function handleInstallDownloadedFile() {
+    let archive: string | null = null;
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: language === "de" ? "Heruntergeladenes Archiv auswählen" : "Select downloaded archive",
+        filters: [{ name: "Archives", extensions: ["zip", "7z", "rar", "001"] }],
+      });
+      archive = typeof selected === "string" ? selected : selected?.[0] ?? null;
+    } catch (err) {
+      setDownloadInstallError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!archive) return;
+
+    let destination: string | null = null;
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: language === "de" ? "Installationsordner auswählen" : "Select install destination folder",
+        defaultPath: currentModRoot || undefined,
+      });
+      destination = typeof selected === "string" ? selected : selected?.[0] ?? null;
+    } catch (err) {
+      setDownloadInstallError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!destination) return;
+
+    const fileName = archive.split(/[\\/]/).pop() || "download.zip";
+    const modName = fileName.replace(/\.(?:zip|7z|rar)?\.001$/i, "").replace(/\.(zip|7z|rar)$/i, "") || "Downloaded Mod";
+    const requestId = `local-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    setDownloadInstallError(null);
+    setInstallingDownloadedFile(true);
+    handleDownloadEvent({
+      kind: "start",
+      source: "manager",
+      id: requestId,
+      modName,
+      fileName,
+      destinationPath: destination,
+    });
+
+    try {
+      const result = await invoke<{
+        installed_path: string;
+        destination_path: string;
+        preview_path: string | null;
+      }>("install_local_archive_mod", {
+        archivePath: archive,
+        destItemPath: destination,
+        modName,
+        previewUrl: null,
+      });
+      handleDownloadEvent({
+        kind: "success",
+        source: "manager",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: result.destination_path,
+        installedPath: result.installed_path,
+        previewPath: result.preview_path,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDownloadInstallError(message);
+      handleDownloadEvent({
+        kind: "error",
+        source: "manager",
+        id: requestId,
+        modName,
+        fileName,
+        destinationPath: destination,
+        message,
+      });
+    } finally {
+      setInstallingDownloadedFile(false);
+    }
+  }
+
   async function handleCreateAllMissingFolders() {
     setSavingSettings(true);
     setSaveMessage(null);
@@ -2013,6 +2157,53 @@ function App() {
       await refresh();
     } catch (err) {
       setSaveMessage(`Create missing folders failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
+  async function handleCleanCharacterMods() {
+    if (!currentModRoot.trim()) {
+      setSaveMessage(L.noConfiguredModFolder);
+      return;
+    }
+
+    const confirmed = window.confirm(
+      language === "de"
+        ? `Alle Ordner aus ${currentModRoot}\\characters, deren Namen nicht mit einer ID in der Charakterliste für ${GAMES[highlightedGame].name} übereinstimmen, nach ${currentModRoot} verschieben? Der gesamte Ordnerinhalt wird mitverschoben. Bei Namenskonflikten wird ein neuer eindeutiger Zielordner verwendet.`
+        : `Move every folder from ${currentModRoot}\\characters whose name does not match an ID in the ${GAMES[highlightedGame].name} character list into ${currentModRoot}? All nested contents will move with it. If a destination name already exists, a unique destination folder will be used.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setSavingSettings(true);
+    setSaveMessage(null);
+    try {
+      const result = await invoke<{
+        moved: string[];
+        failures: string[];
+      }>("cleanup_character_mods", {
+        game: highlightedGame,
+        modRoot: currentModRoot,
+      });
+      const movedDetails = result.moved.slice(0, 5);
+      const remainingMoved = result.moved.length - movedDetails.length;
+      const message = [
+        language === "de"
+          ? `${result.moved.length} Ordner verschoben.`
+          : `Moved ${result.moved.length} folder${result.moved.length === 1 ? "" : "s"}.`,
+        movedDetails.length > 0
+          ? `${language === "de" ? "Verschoben" : "Moved"}: ${movedDetails.join(", ")}${remainingMoved > 0 ? `, ${language === "de" ? `und ${remainingMoved} weitere` : `and ${remainingMoved} more`}` : ""}.`
+          : "",
+        result.failures.length > 0
+          ? `${language === "de" ? "Fehler" : "Errors"}: ${result.failures.join(" | ")}`
+          : "",
+      ].filter(Boolean).join(" ");
+      setSaveMessage(message);
+      await loadGameState(highlightedGame, activeItemId);
+    } catch (err) {
+      setSaveMessage(`Character folder cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSavingSettings(false);
     }
@@ -2058,12 +2249,12 @@ function App() {
     setRunningFix(scriptName);
 
     try {
-      await invoke("run_fix_script", {
+      const launchedInConsole = await invoke<boolean>("run_fix_script", {
         game: highlightedGame,
         scriptName,
         targetPath: activeScriptTarget,
       });
-      setSaveMessage(`Started ${scriptName} in a separate console window.`);
+      setSaveMessage(`${scriptName}: ${launchedInConsole ? L.runInConsole : L.runAsGui}`);
     } catch (runError) {
       setSaveMessage(runError instanceof Error ? runError.message : String(runError));
     } finally {
@@ -2075,11 +2266,11 @@ function App() {
     setLaunchingFixSource(scriptName);
 
     try {
-      await invoke("launch_fix_script_source", {
+      const launchedInConsole = await invoke<boolean>("launch_fix_script_source", {
         game: highlightedGame,
         scriptName,
       });
-      setSaveMessage(`Launched ${scriptName} from its source folder.`);
+      setSaveMessage(`${scriptName}: ${launchedInConsole ? L.runInConsole : L.launchExternally}`);
     } catch (launchError) {
       setSaveMessage(launchError instanceof Error ? launchError.message : String(launchError));
     } finally {
@@ -2171,6 +2362,8 @@ function App() {
         resources_url: string | null;
         exe_url: string | null;
         updater_url: string | null;
+        app_release_notes?: string;
+        resources_release_notes?: string;
       }>("check_for_updates", { force: options?.force ?? false });
 
       // Keep local updater binary in sync with the latest release payload.
@@ -2214,15 +2407,20 @@ function App() {
     }
   }
 
-  async function handleDownloadUpdate(infoOverride?: { resources_url: string | null; latest_tag?: string; resources_latest_tag?: string; updater_url?: string | null }) {
+  async function handleDownloadUpdate(infoOverride?: {
+    resources_url: string | null;
+    latest_tag?: string;
+    resources_latest_tag?: string;
+    resources_release_notes?: string;
+    updater_url?: string | null;
+  }) {
     const info = infoOverride ?? updateInfo;
     if (!info?.resources_url) return;
 
     const resourceTag = info.resources_latest_tag ?? info.latest_tag ?? "latest";
-    const purgeHint = removeDownloadedStockFixesAfterUpdate
-      ? "\n\nStock downloaded fixes will be deleted after update (custom fixes remain)."
-      : "";
-    const approve = window.confirm(`Download resources update v${resourceTag} now?${purgeHint}`);
+    const approve = window.confirm(
+      `Download resources update v${resourceTag} now?\n\nStock fixes will be replaced by the updated set. Custom fixes will be kept.`,
+    );
     if (!approve) {
       return;
     }
@@ -2233,9 +2431,15 @@ function App() {
       const result = await invoke<string>("download_and_update_resources", {
         url: info.resources_url,
         latestTag: resourceTag,
+        releaseNotes: info.resources_release_notes ?? "",
         updaterUrl: info.updater_url ?? null,
       });
       setUpdateMsg(`Resources updated to v${resourceTag} at ${result}.`);
+      setChangelog({
+        title: "Resources update",
+        tag: resourceTag,
+        notes: info.resources_release_notes ?? "",
+      });
       setUpdateInfo(null);
       await refresh();
     } catch (err) {
@@ -2245,7 +2449,13 @@ function App() {
     }
   }
 
-  async function handleLaunchAppUpdater(infoOverride?: { updater_url: string | null; exe_url?: string | null; latest_tag?: string; app_latest_tag?: string }) {
+  async function handleLaunchAppUpdater(infoOverride?: {
+    updater_url: string | null;
+    exe_url?: string | null;
+    latest_tag?: string;
+    app_latest_tag?: string;
+    app_release_notes?: string;
+  }) {
     const info = infoOverride ?? updateInfo;
     const targetVersion = info?.app_latest_tag ?? info?.latest_tag ?? "?";
     const approve = window.confirm(`Launch updater to install app update v${targetVersion} now?`);
@@ -2256,10 +2466,13 @@ function App() {
     setUpdateDownloading(true);
     setUpdateMsg(null);
     try {
+      await invoke("mark_app_update_seen", {
+        latestTag: targetVersion,
+        releaseNotes: info?.app_release_notes ?? "",
+      });
+
       if (info?.updater_url) {
         try {
-          await invoke("mark_app_update_seen", { latestTag: targetVersion });
-
           const updaterPath = await invoke<string>("download_and_launch_updater", {
             url: info.updater_url,
             appUrl: info.exe_url ?? null,
@@ -2501,7 +2714,7 @@ function App() {
                 setActiveTab("manager");
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                "order-1 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                 activeTab === "manager"
                   ? navActiveClassName
                   : navIdleClassName,
@@ -2517,7 +2730,7 @@ function App() {
                 setActiveTab("browse");
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                "order-3 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                 activeTab === "browse"
                   ? navActiveClassName
                   : navIdleClassName,
@@ -2533,7 +2746,7 @@ function App() {
                 setActiveTab("downloads");
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                "order-2 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                 activeTab === "downloads"
                   ? navActiveClassName
                   : navIdleClassName,
@@ -2550,7 +2763,7 @@ function App() {
                   setActiveTab("modding-sites");
                 }}
                 className={clsx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  "order-4 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                   activeTab === "modding-sites"
                     ? navActiveClassName
                     : navIdleClassName,
@@ -2568,7 +2781,7 @@ function App() {
                   setActiveTab("discord");
                 }}
                 className={clsx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  "order-8 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                   activeTab === "discord"
                     ? navActiveClassName
                     : navIdleClassName,
@@ -2586,7 +2799,7 @@ function App() {
                   setActiveTab("nextcloud-side");
                 }}
                 className={clsx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                  "order-5 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                   activeTab === "nextcloud-side"
                     ? navActiveClassName
                     : navIdleClassName,
@@ -2597,31 +2810,25 @@ function App() {
                 {L.cloudSide}
               </button>
             ) : null}
-            {showModelPreviewTab ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("model-preview");
-                }}
-                className={clsx(
-                  "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
-                  activeTab === "model-preview"
-                    ? navActiveClassName
-                    : navIdleClassName,
-                )}
-                style={activeTab === "model-preview" ? navActiveStyle : navIdleStyle}
-              >
-                <Layers3 className="h-4 w-4" />
-                {L.modelPreview}
-              </button>
-            ) : null}
+            <button
+              type="button"
+              onClick={() => setActiveTab("model-viewer")}
+              className={clsx(
+                "order-7 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                activeTab === "model-viewer" ? navActiveClassName : navIdleClassName,
+              )}
+              style={activeTab === "model-viewer" ? navActiveStyle : navIdleStyle}
+            >
+              <Layers3 className="h-4 w-4" />
+              {L.modelViewer}
+            </button>
             <button
               type="button"
               onClick={() => {
                 setActiveTab("fixes");
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                "order-6 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                 activeTab === "fixes"
                   ? navActiveClassName
                   : navIdleClassName,
@@ -2637,7 +2844,7 @@ function App() {
                 setActiveTab("settings");
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
+                "order-9 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition",
                 activeTab === "settings"
                   ? navActiveClassName
                   : navIdleClassName,
@@ -2653,7 +2860,7 @@ function App() {
                 void refresh();
               }}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
+                "order-last inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
                 isGameTheme
                   ? "text-slate-100 hover:brightness-110"
                   : "border-white/10 bg-white text-slate-950 hover:bg-cyan-100",
@@ -2681,7 +2888,7 @@ function App() {
               onClick={() => void handleCheckForUpdates({ force: true })}
               disabled={updateChecking || updateDownloading}
               className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
+                "order-last inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-wait disabled:opacity-70",
                 updateInfo?.available
                   ? isGameTheme
                     ? "text-slate-100"
@@ -2707,7 +2914,7 @@ function App() {
                   : "Check updates"}
             </button>
             <label
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.14em] text-slate-300"
+              className="order-last inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.14em] text-slate-300"
               style={isGameTheme ? { borderColor: gameAccentFaint, color: "#dbeafe" } : undefined}
             >
               Active game
@@ -2926,6 +3133,41 @@ function App() {
         {updateMsg ? (
           <p className="mt-3 text-sm text-slate-300">{updateMsg}</p>
         ) : null}
+        {changelog ? (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/75 p-4">
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="release-changelog-title"
+              className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-slate-900 text-slate-100 shadow-2xl"
+            >
+              <header className="flex items-start justify-between gap-4 border-b border-white/10 px-6 py-4">
+                <div>
+                  <h2 id="release-changelog-title" className="text-lg font-semibold">
+                    {changelog.title} v{changelog.tag}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-400">Release notes from GitHub</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setChangelog(null)}
+                  className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/10"
+                >
+                  Close
+                </button>
+              </header>
+              <div className="overflow-y-auto px-6 py-5">
+                {changelog.notes.trim() ? (
+                  <div className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">
+                    {changelog.notes}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-400">This release does not include published release notes.</p>
+                )}
+              </div>
+            </section>
+          </div>
+        ) : null}
 
         {activeTab === "browse" ? (
           <BrowseTab
@@ -3058,12 +3300,8 @@ function App() {
             gameModRoot={currentModRoot}
             onDownloadEvent={handleDownloadEvent}
           />
-        ) : activeTab === "model-preview" && showModelPreviewTab ? (
-          <ModelPreviewTab
-            modelPath={modelPreviewPath}
-            onModelPathChange={setModelPreviewPath}
-            toAssetSrc={toAssetSrc}
-          />
+        ) : activeTab === "model-viewer" ? (
+          <ModelViewerTab gameModPath={currentModRoot} language={language} />
         ) : (
           <>
 
@@ -3844,15 +4082,38 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    void handleInstallerSetup();
-                  }}
+                  onClick={() => void handleCleanCharacterMods()}
                   disabled={savingSettings}
-                  className="inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-wait disabled:opacity-70"
+                  className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-500/15 px-4 py-2 text-sm font-medium text-amber-100 transition hover:bg-amber-500/25 disabled:cursor-wait disabled:opacity-70"
                 >
-                  <Download className="h-4 w-4" />
-                  {savingSettings ? "Running install setup..." : L.installRepairSetup}
+                  <FolderTree className="h-4 w-4" />
+                  {savingSettings ? L.cleaningCharacterFolders : L.cleanCharacterMods}
                 </button>
+                {devModeEnabled && showInstallRepairSetup ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleInstallerSetup();
+                    }}
+                    disabled={savingSettings}
+                    className="inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-500/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-wait disabled:opacity-70"
+                  >
+                    <Download className="h-4 w-4" />
+                    {savingSettings ? "Running install setup..." : L.installRepairSetup}
+                  </button>
+                ) : null}
+                {canMigrateLegacyInstall ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleMigrateLegacyInstall()}
+                    disabled={savingSettings}
+                    title={L.migrateInstallDescription}
+                    className="inline-flex items-center gap-2 rounded-full border border-violet-300/30 bg-violet-500/20 px-4 py-2 text-sm font-medium text-violet-100 transition hover:bg-violet-500/30 disabled:cursor-wait disabled:opacity-70"
+                  >
+                    <FolderTree className="h-4 w-4" />
+                    {L.migrateInstall}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -4005,10 +4266,13 @@ function App() {
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
-                      checked={Boolean(draftSettings?.remove_downloaded_stock_fixes_after_update ?? false)}
+                      checked={removeDownloadedStockFixesAfterUpdate}
                       onChange={(event) => {
                         const nextValue = event.currentTarget.checked;
-                        updateDraftSettings((current) => ({ ...current, remove_downloaded_stock_fixes_after_update: nextValue }));
+                        updateDraftSettings((current) => ({
+                          ...current,
+                          remove_downloaded_stock_fixes_after_update: nextValue,
+                        }));
                       }}
                     />
                     {L.removeStockFixes}
@@ -4119,13 +4383,16 @@ function App() {
                       <label className="flex items-center gap-2">
                         <input
                           type="checkbox"
-                          checked={Boolean(draftSettings?.dev_enable_model_preview_tab ?? false)}
+                          checked={showInstallRepairSetup}
                           onChange={(event) => {
                             const nextValue = event.currentTarget.checked;
-                            updateDraftSettings((current) => ({ ...current, dev_enable_model_preview_tab: nextValue }));
+                            updateDraftSettings((current) => ({
+                              ...current,
+                              dev_show_install_repair: nextValue,
+                            }));
                           }}
                         />
-                        {L.modelPreviewToggle}
+                        {L.showInstallRepair}
                       </label>
                       <label className="flex items-center gap-2">
                         <input
@@ -4150,7 +4417,9 @@ function App() {
                         {L.useAllBg}
                       </label>
                       <p className="text-xs text-slate-400">
-                        Folder layout: {`${state?.exe_dir ?? "<exe-dir>"}/app`} with icon/, all/, gi/, hsr/, wuwa/, zzz/, end/. Any supported image file name works.
+                        {language === "de"
+                          ? `Eigene Icon-Ordner: ${state?.exe_dir ?? "<exe-dir>"}\\app\\icons mit genshin, wuwa, star rail, zzz und end. Dateinamen müssen Charakter-IDs entsprechen; eigene Icons überschreiben die Standard-Icons.`
+                          : `Custom icon folders: ${state?.exe_dir ?? "<exe-dir>"}/app/icons with genshin/, wuwa/, star rail/, zzz/, and end/. Filenames must match character IDs; custom icons override stock icons.`}
                       </p>
                       {Boolean(draftSettings?.dev_use_image_background ?? false) ? (
                         <p className="text-xs text-slate-400">
@@ -4268,11 +4537,24 @@ function App() {
                   Open Last Download Folder
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => void handleInstallDownloadedFile()}
+                disabled={installingDownloadedFile}
+                className="inline-flex items-center gap-2 rounded-full border border-amber-300/30 bg-amber-500/18 px-4 py-2 text-sm font-medium text-amber-100 transition hover:bg-amber-500/28 disabled:cursor-wait disabled:opacity-70"
+              >
+                {installingDownloadedFile ? "Installing..." : L.installDownloadedFile}
+              </button>
             </div>
 
             <p className="mt-3 text-sm text-slate-300/80">
               Active and completed downloads for this app session from Mod-Browser, GameBanana, Arca, Discord, and Cloud tabs. This list resets when the app is closed.
             </p>
+            {downloadInstallError ? (
+              <p className="mt-3 rounded-2xl border border-rose-300/20 bg-rose-400/10 p-3 text-sm text-rose-100">
+                {downloadInstallError}
+              </p>
+            ) : null}
 
             <div className="mt-4 space-y-3">
               {downloadRecords.length === 0 ? (
@@ -4468,6 +4750,9 @@ function App() {
                 </button>
               </div>
               <div className="mt-4 max-h-[42vh] space-y-3 overflow-y-auto pr-1">
+                <p className="rounded-xl border border-cyan-300/15 bg-cyan-400/5 px-3 py-2 text-xs leading-5 text-slate-300">
+                  {L.fixLaunchDescription}
+                </p>
                 {fixesLoading ? (
                   <p className="text-sm text-slate-300">Loading fixes...</p>
                 ) : fixesPanel?.scripts.length ? (
@@ -4486,7 +4771,9 @@ function App() {
                             }}
                             disabled={launchingFixSource === script.name}
                             className="rounded-full border border-emerald-300/30 bg-emerald-400/18 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-400/28 disabled:cursor-wait disabled:opacity-70"
-                            title="Launch from fix source folder"
+                            title={language === "de"
+                              ? "Startet den Fix aus dem Ressourcenordner. Für Tools mit eigener GUI und Ordnerauswahl."
+                              : "Launches this fix from its resources folder. Use this for tools with their own GUI and directory picker."}
                           >
                             {launchingFixSource === script.name ? "Launching..." : "Launch"}
                           </button>
@@ -4497,6 +4784,9 @@ function App() {
                             }}
                             disabled={runningFix === script.name || !activeScriptTarget}
                             className="rounded-full border border-white/10 bg-white px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-100 disabled:cursor-wait disabled:opacity-70"
+                            title={language === "de"
+                              ? "Startet den Fix mit dem im Kopfbereich gewählten Ordner als Arbeitsverzeichnis."
+                              : "Runs this fix with the directory selected in the header as its working directory. Use this for fixes run inside a broken mod folder."}
                           >
                             {runningFix === script.name ? "Starting..." : "Run"}
                           </button>

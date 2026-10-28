@@ -49,9 +49,9 @@ export interface Settings {
   arca_saved_username: string;
   arca_saved_password: string;
   dev_mode: boolean;
+  dev_show_install_repair: boolean;
   dev_use_image_background: boolean;
   dev_use_all_backgrounds: boolean;
-  dev_enable_model_preview_tab: boolean;
   last_release_tag: string | null;
   install_path_info: string | null;
   last_selected_game: GameKey;
@@ -73,6 +73,7 @@ export interface BootstrapState {
   legacy_install: LegacyInstall | null;
   settings: Settings;
   settings_found: boolean;
+  can_migrate_install: boolean;
   detected_paths: string[];
   app_version: string;
   needs_setup: boolean;

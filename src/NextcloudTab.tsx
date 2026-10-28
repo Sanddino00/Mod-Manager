@@ -49,11 +49,14 @@ function deriveNameFromUrl(url: string, fallback = "download"): string {
 }
 
 function deriveModName(fileName: string): string {
-  return fileName.replace(/\.[A-Za-z0-9]{1,8}$/u, "").trim() || "Imported Mod";
+  return fileName
+    .replace(/\.(?:zip|7z|rar)?\.001$/iu, "")
+    .replace(/\.[A-Za-z0-9]{1,8}$/u, "")
+    .trim() || "Imported Mod";
 }
 
 function isLikelyDownloadUrl(url: string): boolean {
-  return /\bdownload\b|attachment|\/files\//i.test(url) || /\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+  return /\bdownload\b|attachment|\/files\//i.test(url) || /\.(zip|7z|rar|001|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
 }
 
 function normalizeUrl(input: string): string {
@@ -215,7 +218,7 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
       directory: false,
       title: "Select downloaded archive",
       defaultPath: downloadsFolder,
-      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar"] }],
+      filters: [{ name: "Archives", extensions: ["zip", "7z", "rar", "001"] }],
     });
 
     if (!picked) {
@@ -516,7 +519,7 @@ export function NextcloudTab({ game, gameModRoot, links, rememberWebSessions = t
         }
         (window).__modManagerNextcloudDownloadHookInstalled = true;
 
-        const isDownloadUrl = (url) => /\\bdownload\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
+        const isDownloadUrl = (url) => /\\bdownload\\b|attachment|\\/files\\//i.test(url) || /\\.(zip|7z|rar|001|pak|exe|dll|txt|msi)(?:$|[?#])/i.test(url);
 
         const toAbsoluteUrl = (value) => {
           try {
